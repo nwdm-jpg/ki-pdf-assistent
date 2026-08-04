@@ -1,0 +1,1 @@
+print("KI-PDF-Assistent startet")
