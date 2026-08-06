@@ -109,26 +109,32 @@ if hochgeladene_datei is not None:
             ", ".join(map(str, ausgewaehlte_seiten)),
         )
 
-        antwort = client.responses.create(
-            model="gpt-5-mini",
-            input=[
-                {
-                    "role": "system",
-                    "content": (
-                        "Beantworte die Frage ausschließlich anhand der "
-                        "bereitgestellten PDF-Seiten. Wenn die Antwort nicht "
-                        "im Text steht, sage das klar."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        f"Relevante PDF-Seiten:\n{relevanter_text}\n\n"
-                        f"Frage: {frage}"
-                    ),
-                },
-            ],
-        )
+        try:
+            with st.spinner("Die KI analysiert die PDF..."):
+                antwort = client.responses.create(
+                    model="gpt-5-mini",
+                    input=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "Beantworte die Frage ausschließlich anhand der "
+                                "bereitgestellten PDF-Seiten. Wenn die Antwort nicht "
+                                "im Text steht, sage das klar."
+                            ),
+                        },
+                        {
+                            "role": "user",
+                            "content": (
+                                f"Relevante PDF-Seiten:\n{relevanter_text}\n\n"
+                                f"Frage: {frage}"
+                            ),
+                        },
+                    ],
+                )
 
-        st.subheader("Antwort")
-        st.write(antwort.output_text)
+            st.subheader("Antwort")
+            st.write(antwort.output_text)
+
+        except Exception as fehler:
+            st.error("Die KI-Anfrage ist fehlgeschlagen.")
+            st.caption(f"Technische Details: {fehler}")
