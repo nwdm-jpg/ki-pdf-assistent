@@ -38,7 +38,12 @@ hochgeladene_datei = st.file_uploader(
 )
 
 if hochgeladene_datei is not None:
-    reader = PdfReader(hochgeladene_datei)
+    try:
+        reader = PdfReader(hochgeladene_datei)
+    except Exception as fehler:
+        st.error("Die PDF konnte nicht gelesen werden.")
+        st.caption(f"Technische Details: {fehler}")
+        st.stop()
 
     st.success(f"Datei geladen: {hochgeladene_datei.name}")
     st.write(f"Anzahl Seiten: {len(reader.pages)}")
