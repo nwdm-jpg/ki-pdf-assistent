@@ -2,6 +2,10 @@ from pathlib import Path
 
 from pypdf import PdfReader
 
+from openai import OpenAI
+
+client = OpenAI()
+
 dateiname = input("Wie heißt die PDF-Datei? ")
 pdf_pfad = Path("pdfs") / dateiname
 
@@ -25,31 +29,35 @@ else:
     print(f"Anzahl Zeichen: {len(gesamter_text)}")
 
     while True:
-        suchbegriff = input(
-            "\nWonach möchtest du suchen? "
+        frage = input(
+            "\nWelche Frage möchtest du zur PDF stellen? "
             "(Zum Beenden: ende) "
         )
 
-        if suchbegriff.lower() == "ende":
+        if frage.lower() == "ende":
             print("Programm beendet.")
             break
 
-        text_klein = gesamter_text.lower()
-        suchbegriff_klein = suchbegriff.lower()
+        antwort = client.responses.create(
+            model="gpt-5-mini",
+            input=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Beantworte die Frage ausschließlich anhand des "
+                        "bereitgestellten PDF-Textes. Wenn die Antwort nicht "
+                        "im Text steht, sage das klar."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"PDF-Text:\n{gesamter_text}\n\n"
+                        f"Frage: {frage}"
+                    ),
+                },
+            ],
+        )
 
-        position = text_klein.find(suchbegriff_klein)
-
-        if position != -1:
-            start = max(0, position - 120)
-            ende = min(
-                len(gesamter_text),
-                position + len(suchbegriff) + 120,
-            )
-
-            textstelle = gesamter_text[start:ende]
-
-            print(f'\nDer Begriff "{suchbegriff}" wurde gefunden.')
-            print("\nPassende Textstelle:")
-            print(textstelle)
-        else:
-            print(f'Der Begriff "{suchbegriff}" wurde nicht gefunden.')
+        print("\nAntwort:")
+        print(antwort.output_text)
