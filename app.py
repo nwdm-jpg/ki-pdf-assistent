@@ -7,6 +7,32 @@ from pypdf import PdfReader
 
 client = OpenAI()
 
+STOPPWOERTER = {
+    "der",
+    "die",
+    "das",
+    "ein",
+    "eine",
+    "und",
+    "oder",
+    "ist",
+    "sind",
+    "im",
+    "in",
+    "am",
+    "an",
+    "auf",
+    "zu",
+    "zur",
+    "zum",
+    "mit",
+    "von",
+    "für",
+    "welche",
+    "was",
+    "wie",
+}
+
 dateiname = input("Wie heißt die PDF-Datei? ")
 pdf_pfad = Path("pdfs") / dateiname
 
@@ -42,9 +68,11 @@ else:
             print("Programm beendet.")
             break
 
-        frage_woerter = set(
-            re.findall(r"\w+", frage.lower())
-        )
+        frage_woerter = {
+            wort
+            for wort in re.findall(r"\w+", frage.lower())
+            if wort not in STOPPWOERTER
+}
 
         bewertete_seiten = []
 
