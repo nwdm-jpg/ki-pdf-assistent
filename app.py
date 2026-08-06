@@ -97,6 +97,18 @@ else:
             for _, seitennummer, seitentext in beste_seiten
         )
 
+
+        ausgewaehlte_seiten = [
+            seitennummer
+            for _, seitennummer, _ in beste_seiten
+        ]
+
+        print(
+            "Verwendete Seiten:",
+            ", ".join(map(str, ausgewaehlte_seiten)),
+        )
+
+
         antwort = client.responses.create(
             model="gpt-5-mini",
             input=[
