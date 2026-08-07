@@ -1,7 +1,9 @@
 import re
+
 import streamlit as st
-from pypdf import PdfReader
 from openai import OpenAI
+from pypdf import PdfReader
+
 
 STOPPWOERTER = {
     "der",
@@ -29,11 +31,15 @@ STOPPWOERTER = {
     "wie",
 }
 
+if "chat_verlauf" not in st.session_state:
+    st.session_state.chat_verlauf = []
+
+client = OpenAI()
 
 st.title("KI-PDF-Assistent")
 
 hochgeladene_datei = st.file_uploader(
-    "PDF-Datei auswählen",
+    "PDF-Datei hinzufügen",
     type=["pdf"],
 )
 
@@ -49,8 +55,7 @@ if hochgeladene_datei is not None:
     st.write(f"Anzahl Seiten: {len(reader.pages)}")
 
     gesamter_text = ""
-
-    seiten_texte =[]
+    seiten_texte = []
 
     for nummer, seite in enumerate(reader.pages, start=1):
         text = seite.extract_text()
@@ -64,12 +69,31 @@ if hochgeladene_datei is not None:
     with st.expander("Extrahierten Text anzeigen"):
         st.text(gesamter_text)
 
-    
-    client = OpenAI()
+    st.divider()
 
-    frage = st.text_input("Welche Frage möchtest du zur PDF stellen?")
+    if st.button("🗑️ Chat leeren"):
+        st.session_state.chat_verlauf = []
+        st.rerun()
+
+    for eintrag in st.session_state.chat_verlauf:
+        with st.chat_message("user"):
+            st.write(eintrag["frage"])
+
+        with st.chat_message("assistant"):
+            st.write(eintrag["antwort"])
+
+            if "seiten" in eintrag:
+                st.caption(
+                    "Verwendete Seiten: "
+                    + ", ".join(map(str, eintrag["seiten"]))
+                )
+
+    frage = st.chat_input("Stelle eine Frage zur PDF...")
 
     if frage:
+        with st.chat_message("user"):
+            st.write(frage)
+
         frage_woerter = {
             wort
             for wort in re.findall(r"\w+", frage.lower())
@@ -104,22 +128,18 @@ if hochgeladene_datei is not None:
             for _, seitennummer, _ in beste_seiten
         ]
 
-        st.write(
-            "Verwendete Seiten:",
-            ", ".join(map(str, ausgewaehlte_seiten)),
-        )
-
         try:
-            with st.spinner("Die KI analysiert die PDF..."):
-                antwort = client.responses.create(
+            with st.chat_message("assistant"):
+                with st.spinner("Die KI analysiert die PDF..."):
+                    antwort = client.responses.create(
                     model="gpt-5-mini",
                     input=[
                         {
                             "role": "system",
                             "content": (
-                                "Beantworte die Frage ausschließlich anhand der "
-                                "bereitgestellten PDF-Seiten. Wenn die Antwort nicht "
-                                "im Text steht, sage das klar."
+                                "Beantworte die Frage ausschließlich anhand "
+                                "der bereitgestellten PDF-Seiten. Wenn die "
+                                "Antwort nicht im Text steht, sage das klar."
                             ),
                         },
                         {
@@ -132,8 +152,15 @@ if hochgeladene_datei is not None:
                     ],
                 )
 
-            st.subheader("Antwort")
-            st.write(antwort.output_text)
+            st.session_state.chat_verlauf.append(
+                {
+                    "frage": frage,
+                    "antwort": antwort.output_text,
+                    "seiten": ausgewaehlte_seiten,
+                }
+            )
+
+            st.rerun()
 
         except Exception as fehler:
             st.error("Die KI-Anfrage ist fehlgeschlagen.")
