@@ -1,6 +1,13 @@
-"""Gemeinsame Logik für PDF-Verarbeitung, Seiten-Retrieval und KI-Anfragen.
+"""Gemeinsame Logik für PDF-Verarbeitung, dokumentübergreifendes Retrieval
+und KI-Anfragen mit Chatverlauf.
 
-Wird sowohl von app.py (CLI) als auch von web_app.py (Streamlit) verwendet.
+Wird sowohl von app.py (CLI, ein Dokument) als auch von web_app.py
+(Streamlit, mehrere Dokumente) verwendet.
+
+Ein Seiteneintrag ist ein Dict der Form
+{"dateiname": str, "seitennummer": int, "text": str}. Für
+dokumentübergreifende Suche werden die Seiteneinträge mehrerer Dokumente
+einfach zu einer flachen Liste zusammengeführt.
 """
 
 import re
@@ -40,103 +47,164 @@ MODELL = "gpt-5-mini"
 client = OpenAI()
 
 
-def pdf_seiten_extrahieren(reader):
+def pdf_seiten_extrahieren(reader, dateiname):
     """Extrahiert den Text aller Seiten eines PdfReader.
 
-    Gibt (gesamter_text, seiten_texte) zurück, wobei seiten_texte eine
-    Liste von (seitennummer, seitentext) für Seiten mit extrahierbarem
-    Text ist.
+    Gibt eine Liste von Seiteneinträgen zurück (nur Seiten mit
+    extrahierbarem Text).
     """
-    gesamter_text = ""
-    seiten_texte = []
+    seiten = []
 
     for nummer, seite in enumerate(reader.pages, start=1):
         text = seite.extract_text()
 
         if text:
-            gesamter_text += f"\n--- Seite {nummer} ---\n{text}"
-            seiten_texte.append((nummer, text))
+            seiten.append(
+                {"dateiname": dateiname, "seitennummer": nummer, "text": text}
+            )
 
-    return gesamter_text, seiten_texte
+    return seiten
 
 
-def relevante_seiten_ermitteln(frage, seiten_texte, anzahl=3):
-    """Bewertet Seiten anhand der Wortüberschneidung mit der Frage.
+def relevante_seiten_ermitteln(frage, seiten, anzahl=3, zusatzkontext=""):
+    """Bewertet Seiteneinträge anhand der Wortüberschneidung mit der Frage
+    und liefert je Dokument die `anzahl` besten Seiten zurück.
 
-    Gibt die `anzahl` besten Seiten als Liste von
-    (treffer, seitennummer, seitentext) zurück, absteigend sortiert.
+    Die Auswahl erfolgt bewusst pro Dokument (nicht als ein gemeinsamer
+    Top-N über alle Seiten hinweg): Sonst könnte ein bereits besprochenes
+    Dokument bei einer Rückfrage wie "Und wie ist das im zweiten
+    Vertrag?" allein durch Kontext-Überschneidung alle Plätze belegen und
+    das eigentlich gemeinte zweite Dokument komplett verdrängen. So
+    bleiben alle hochgeladenen Dokumente im Blick der KI, die dank
+    Chatverlauf (siehe `frage_beantworten`) den Bezug "zweiter Vertrag"
+    selbst auflösen kann.
+
+    `zusatzkontext` (z. B. der letzte Chatverlauf) fließt zusätzlich in
+    die Bewertung ein, damit auch inhaltsarme Rückfragen noch die
+    passenden Seiten finden.
+
+    Gibt eine Liste von Seiteneinträgen zurück, gruppiert nach Dokument
+    (in der Reihenfolge ihres ersten Auftretens in `seiten`) und
+    innerhalb jedes Dokuments absteigend nach Trefferzahl sortiert.
     """
+    suchtext = f"{zusatzkontext}\n{frage}" if zusatzkontext else frage
+
     frage_woerter = {
         wort
-        for wort in re.findall(r"\w+", frage.lower())
+        for wort in re.findall(r"\w+", suchtext.lower())
         if wort not in STOPPWOERTER
     }
 
-    bewertete_seiten = []
+    seiten_je_dokument = {}
 
-    for seitennummer, seitentext in seiten_texte:
-        seiten_woerter = set(re.findall(r"\w+", seitentext.lower()))
+    for eintrag in seiten:
+        seiten_je_dokument.setdefault(eintrag["dateiname"], []).append(eintrag)
 
-        treffer = len(frage_woerter & seiten_woerter)
+    ergebnis = []
 
-        bewertete_seiten.append((treffer, seitennummer, seitentext))
+    for dokument_seiten in seiten_je_dokument.values():
+        bewertete_seiten = []
 
-    return sorted(bewertete_seiten, reverse=True)[:anzahl]
+        for eintrag in dokument_seiten:
+            seiten_woerter = set(re.findall(r"\w+", eintrag["text"].lower()))
+
+            treffer = len(frage_woerter & seiten_woerter)
+
+            bewertete_seiten.append((treffer, eintrag))
+
+        bewertete_seiten.sort(key=lambda paar: paar[0], reverse=True)
+
+        ergebnis.extend(eintrag for _, eintrag in bewertete_seiten[:anzahl])
+
+    return ergebnis
 
 
 def relevanten_text_zusammenstellen(beste_seiten):
     """Baut aus den besten Seiten den Text für den KI-Prompt zusammen."""
     return "\n\n".join(
-        f"--- Seite {seitennummer} ---\n{seitentext}"
-        for _, seitennummer, seitentext in beste_seiten
+        f"--- {eintrag['dateiname']}, Seite {eintrag['seitennummer']} ---\n"
+        f"{eintrag['text']}"
+        for eintrag in beste_seiten
     )
 
 
-def verwendete_seitennummern(beste_seiten):
-    """Extrahiert die Seitennummern aus den besten Seiten."""
-    return [seitennummer for _, seitennummer, _ in beste_seiten]
+def verwendete_quellen(beste_seiten):
+    """Extrahiert (dateiname, seitennummer)-Paare aus den besten Seiten."""
+    return [
+        (eintrag["dateiname"], eintrag["seitennummer"]) for eintrag in beste_seiten
+    ]
 
 
-def formatiere_seitenhinweis(seitennummern):
-    """Formatiert Seitenzahlen als lesbaren deutschen Quellenhinweis.
+def formatiere_quellenhinweis(quellen):
+    """Formatiert (dateiname, seitennummer)-Paare als lesbaren Quellenhinweis.
 
-    Entfernt Duplikate und sortiert aufsteigend. Verwendet bei genau einer
-    Seite die Singularform ("Verwendete Seite: 3"), sonst die Pluralform
-    ("Verwendete Seiten: 3, 7, 12"). Gibt einen leeren String zurück, wenn
-    keine Seitennummern übergeben wurden.
+    Gruppiert nach Dateiname, entfernt Duplikate und sortiert Dateinamen
+    sowie Seitenzahlen aufsteigend. Verwendet je Dokument die Singular-
+    ("Seite 3") bzw. Pluralform ("Seiten 3, 7"). Gibt "" zurück, wenn
+    keine Quellen übergeben wurden.
     """
-    eindeutige_seiten = sorted(set(seitennummern))
+    seiten_je_datei = {}
 
-    if not eindeutige_seiten:
+    for dateiname, seitennummer in quellen:
+        seiten_je_datei.setdefault(dateiname, set()).add(seitennummer)
+
+    if not seiten_je_datei:
         return ""
 
-    if len(eindeutige_seiten) == 1:
-        return f"Verwendete Seite: {eindeutige_seiten[0]}"
+    teile = []
 
-    return "Verwendete Seiten: " + ", ".join(str(s) for s in eindeutige_seiten)
+    for dateiname in sorted(seiten_je_datei):
+        seitenzahlen = sorted(seiten_je_datei[dateiname])
+
+        if len(seitenzahlen) == 1:
+            teile.append(f"{dateiname} (Seite {seitenzahlen[0]})")
+        else:
+            teile.append(
+                f"{dateiname} (Seiten "
+                + ", ".join(str(s) for s in seitenzahlen)
+                + ")"
+            )
+
+    return "Quellen: " + "; ".join(teile)
 
 
-def frage_beantworten(frage, relevanter_text):
-    """Stellt die Frage zusammen mit dem relevanten PDF-Text an die KI."""
-    antwort = client.responses.create(
-        model=MODELL,
-        input=[
-            {
-                "role": "system",
-                "content": (
-                    "Beantworte die Frage ausschließlich anhand der "
-                    "bereitgestellten PDF-Seiten. Wenn die Antwort nicht "
-                    "im Text steht, sage das klar."
-                ),
-            },
-            {
-                "role": "user",
-                "content": (
-                    f"Relevante PDF-Seiten:\n{relevanter_text}\n\n"
-                    f"Frage: {frage}"
-                ),
-            },
-        ],
+def frage_beantworten(frage, relevanter_text, verlauf=None):
+    """Stellt die Frage zusammen mit dem relevanten PDF-Text an die KI.
+
+    `verlauf` ist optional eine Liste bisheriger Chat-Einträge
+    ({"frage": ..., "antwort": ...}) aus dem aktuellen Gespräch, damit
+    Rückfragen ohne Wiederholung des Themas verstanden werden. Der
+    Verlauf dient dabei nur der Einordnung von Bezügen, nicht als
+    zusätzliche Wissensquelle.
+    """
+    system_text = (
+        "Beantworte die Frage ausschließlich anhand der bereitgestellten "
+        "PDF-Seiten. Wenn die Antwort nicht im Text steht, sage das klar."
     )
+
+    if verlauf:
+        system_text += (
+            " Nutze den bisherigen Chatverlauf ausschließlich, um Bezüge "
+            "und Rückfragen (z. B. 'im zweiten Vertrag') richtig "
+            "einzuordnen — nicht als zusätzliche Wissensquelle."
+        )
+
+    nachrichten = [{"role": "system", "content": system_text}]
+
+    for eintrag in verlauf or []:
+        nachrichten.append({"role": "user", "content": eintrag["frage"]})
+        nachrichten.append({"role": "assistant", "content": eintrag["antwort"]})
+
+    nachrichten.append(
+        {
+            "role": "user",
+            "content": (
+                f"Relevante PDF-Seiten:\n{relevanter_text}\n\n"
+                f"Frage: {frage}"
+            ),
+        }
+    )
+
+    antwort = client.responses.create(model=MODELL, input=nachrichten)
 
     return antwort.output_text

@@ -30,26 +30,31 @@ There are no lint, format, or test commands configured in this repo.
 
 ## Architecture
 
-`app.py` and `web_app.py` are thin entry points that share their PDF/retrieval/OpenAI logic via `pdf_logik.py`; UI-specific orchestration (print statements, Streamlit widgets, spinners, try/except boundaries) stays in each entry point:
+`app.py` and `web_app.py` are entry points that share their PDF/retrieval/OpenAI logic via `pdf_logik.py`; UI-specific orchestration (print statements, Streamlit widgets, spinners, try/except boundaries) stays in each entry point:
 
-- **`web_app.py`** — Streamlit UI (main entry point). Handles PDF upload, extraction, chat-style Q&A, and keeps chat history in `st.session_state.chat_verlauf`.
-- **`app.py`** — CLI equivalent of the same flow: loads a PDF by filename from `pdfs/`, loops on stdin questions until the user types `ende`.
-- **`pdf_logik.py`** — shared module: PDF text extraction, keyword-based page retrieval, and the OpenAI call. Holds the module-level `client = OpenAI()` (env-based key handling), `STOPPWOERTER`, and `MODELL`.
+- **`web_app.py`** — Streamlit UI (main entry point). Multi-document, conversational chat assistant: upload any number of PDFs at once (sidebar), ask questions that search across all of them, and get answers grounded in the retrieved excerpts with filename+page sources. Chat history lives in `st.session_state.chat_verlauf`; uploaded documents (each already extracted into page-level entries) live in `st.session_state.dokumente`, keyed by `(dateiname, size)` so re-running the script doesn't re-parse unchanged files and removing a file from the uploader drops it from state.
+- **`app.py`** — CLI equivalent for a *single* PDF: loads a file by filename from `pdfs/`, loops on stdin questions until the user types `ende`. No multi-document or conversational-history features — each question is answered independently, matching its original behavior.
+- **`pdf_logik.py`** — shared module: PDF text extraction, keyword-based multi-document page retrieval, source formatting, and the OpenAI call (with optional chat-history threading). Holds the module-level `client = OpenAI()` (env-based key handling), `STOPPWOERTER`, and `MODELL`.
 - **`api_test.py`** — minimal standalone script to verify the OpenAI API key/connection works.
+
+### Data model: Seiteneintrag
+
+A **Seiteneintrag** is a dict `{"dateiname": str, "seitennummer": int, "text": str}` — one page of one document. Multi-document search is just a flat list of Seiteneintrag dicts pooled from every uploaded file (see `web_app.py`'s `alle_seiten`); the single-document CLI case is simply a pool containing one document's pages.
 
 ### Question-answering pipeline (`pdf_logik.py`)
 
-1. `pdf_seiten_extrahieren(reader)` — extract text per page from an already-opened `pypdf.PdfReader` → `(gesamter_text, seiten_texte)`, where `seiten_texte` is a list of `(page_number, page_text)`.
-2. `relevante_seiten_ermitteln(frage, seiten_texte, anzahl=3)` — tokenize the question, strip German stopwords (`STOPPWOERTER`), and score every page by the size of the intersection between question words and page words (simple bag-of-words overlap — no embeddings/vector search). Returns the top `anzahl` scoring pages.
-3. `relevanten_text_zusammenstellen(beste_seiten)` / `verwendete_seitennummern(beste_seiten)` — build the prompt text and the list of page numbers used, respectively.
-4. `frage_beantworten(frage, relevanter_text)` — calls `client.responses.create(model=MODELL, ...)` (OpenAI Responses API, not Chat Completions) with a system prompt instructing the model to answer *only* from the provided pages and to say clearly when the answer isn't in the text.
-5. `formatiere_seitenhinweis(seitennummern)` — formats page numbers (from `verwendete_seitennummern`) into a German source-reference string for display: dedups, sorts ascending, and picks singular ("Verwendete Seite: 3") vs. plural ("Verwendete Seiten: 3, 7, 12") wording; returns `""` when given no pages. Used by `web_app.py` to show sources below each chat answer; `app.py` prints `verwendete_seitennummern` directly (unsorted, relevance order) and does not use this formatter.
+1. `pdf_seiten_extrahieren(reader, dateiname)` — extract text per page from an already-opened `pypdf.PdfReader` → list of Seiteneintrag dicts for that one document (pages with no extractable text are skipped).
+2. `relevante_seiten_ermitteln(frage, seiten, anzahl=3, zusatzkontext="")` — tokenize the question (+ optional `zusatzkontext`), strip German stopwords (`STOPPWOERTER`), and score every page by the size of the intersection between question words and page words (simple bag-of-words overlap — no embeddings/vector search). **Scores and selects the top `anzahl` pages per document, not a single global top-N** — this guarantees every uploaded document gets a chance to appear in the context, even if a prior chat turn's vocabulary biases scoring toward one document (see the follow-up scenario below). `web_app.py` passes the recent chat history as `zusatzkontext` so vocabulary-poor follow-ups still retrieve something relevant, and scales `anzahl` down as the document count grows to keep the prompt bounded.
+3. `relevanten_text_zusammenstellen(beste_seiten)` — builds the prompt text, with each excerpt labeled `--- {dateiname}, Seite {n} ---`.
+4. `verwendete_quellen(beste_seiten)` — extracts `(dateiname, seitennummer)` pairs from the selected pages.
+5. `frage_beantworten(frage, relevanter_text, verlauf=None)` — calls `client.responses.create(model=MODELL, ...)` (OpenAI Responses API, not Chat Completions) with a system prompt instructing the model to answer *only* from the provided pages. When `verlauf` (a list of `{"frage", "antwort"}` dicts from the current chat) is given, prior turns are threaded in as alternating user/assistant messages and the system prompt gains an extra clause: use the history only to resolve references ("im zweiten Vertrag"), never as an additional knowledge source. `app.py` never passes `verlauf`, so its system prompt and behavior are unchanged from the single-document version.
+6. `formatiere_quellenhinweis(quellen)` — formats `(dateiname, seitennummer)` pairs (from `verwendete_quellen`) into a German source string for display: groups by filename, dedups and sorts page numbers, and picks singular ("Seite 3") vs. plural ("Seiten 3, 7") wording per file, e.g. `"Quellen: vertrag_a.pdf (Seite 1); vertrag_b.pdf (Seiten 3, 7)"`. Returns `""` for no sources. Used by `web_app.py` below each chat answer; `app.py` derives its own plain page-number list from `verwendete_quellen` for its console output and does not use this formatter.
 
-Both `app.py` and `web_app.py` call these functions in the same order (extract → score → build prompt text → call model) but wrap them with their own I/O (console prints vs. `st.chat_message`/`st.spinner`/`st.session_state`) — a change to retrieval/scoring/prompt logic only needs to happen in `pdf_logik.py`; a change to how results are presented still belongs in the individual entry point.
+Conversational follow-ups: `web_app.py` passes the last 2 turns' text as `zusatzkontext` to retrieval and the last 6 turns as `verlauf` to `frage_beantworten`, both scoped to `st.session_state.chat_verlauf` (cleared by the "Chat leeren" button, never persisted beyond the session).
 
 ### Language convention
 
-All UI strings, variable/function names, and prompts are in German (e.g. `frage` = question, `antwort` = answer, `seiten` = pages, `gesamter_text` = full text). Keep new code consistent with this convention.
+All UI strings, variable/function names, and prompts are in German (e.g. `frage` = question, `antwort` = answer, `seiten` = pages, `dokumente` = documents). Keep new code consistent with this convention.
 
 ## Files
 
@@ -89,3 +94,26 @@ When such a specification is provided:
 - Do not silently omit requested functionality.
 - If a requirement conflicts with the existing codebase, explain the conflict before making a destructive change.
 - Keep changes reviewable so the resulting files can subsequently be reviewed by ChatGPT.
+
+## Autonomous development workflow
+
+When I request a feature or change, handle the complete development workflow yourself.
+
+Process:
+
+1. Understand the requested feature and inspect the relevant existing code.
+2. Create a short implementation plan internally before editing files.
+3. Implement the feature directly in the project.
+4. Preserve existing working functionality unless a change is explicitly required.
+5. Run appropriate syntax checks and tests.
+6. If a test fails, diagnose and fix the issue automatically.
+7. Repeat testing until the implementation works or a real blocker is reached.
+8. Do not ask unnecessary questions when a reasonable implementation decision can be made independently.
+9. Do not commit or push automatically unless explicitly requested.
+10. At the end, provide a concise summary of:
+   - what was implemented,
+   - files changed,
+   - tests performed,
+   - remaining issues, if any.
+
+For larger features, prefer implementing the feature completely rather than stopping after planning.

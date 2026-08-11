@@ -7,7 +7,7 @@ from pdf_logik import (
     pdf_seiten_extrahieren,
     relevante_seiten_ermitteln,
     relevanten_text_zusammenstellen,
-    verwendete_seitennummern,
+    verwendete_quellen,
 )
 
 
@@ -23,10 +23,11 @@ else:
     print("PDF erfolgreich geöffnet.")
     print(f"Anzahl Seiten: {len(reader.pages)}")
 
-    gesamter_text, seiten_texte = pdf_seiten_extrahieren(reader)
+    seiten = pdf_seiten_extrahieren(reader, dateiname)
+    anzahl_zeichen = sum(len(eintrag["text"]) for eintrag in seiten)
 
     print("PDF wurde vollständig eingelesen.")
-    print(f"Anzahl Zeichen: {len(gesamter_text)}")
+    print(f"Anzahl Zeichen: {anzahl_zeichen}")
 
     while True:
         frage = input(
@@ -38,9 +39,12 @@ else:
             print("Programm beendet.")
             break
 
-        beste_seiten = relevante_seiten_ermitteln(frage, seiten_texte)
+        beste_seiten = relevante_seiten_ermitteln(frage, seiten)
         relevanter_text = relevanten_text_zusammenstellen(beste_seiten)
-        ausgewaehlte_seiten = verwendete_seitennummern(beste_seiten)
+        ausgewaehlte_seiten = [
+            seitennummer
+            for _, seitennummer in verwendete_quellen(beste_seiten)
+        ]
 
         print(
             "Verwendete Seiten:",
