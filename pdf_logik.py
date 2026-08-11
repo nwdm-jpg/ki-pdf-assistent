@@ -97,6 +97,25 @@ def verwendete_seitennummern(beste_seiten):
     return [seitennummer for _, seitennummer, _ in beste_seiten]
 
 
+def formatiere_seitenhinweis(seitennummern):
+    """Formatiert Seitenzahlen als lesbaren deutschen Quellenhinweis.
+
+    Entfernt Duplikate und sortiert aufsteigend. Verwendet bei genau einer
+    Seite die Singularform ("Verwendete Seite: 3"), sonst die Pluralform
+    ("Verwendete Seiten: 3, 7, 12"). Gibt einen leeren String zurück, wenn
+    keine Seitennummern übergeben wurden.
+    """
+    eindeutige_seiten = sorted(set(seitennummern))
+
+    if not eindeutige_seiten:
+        return ""
+
+    if len(eindeutige_seiten) == 1:
+        return f"Verwendete Seite: {eindeutige_seiten[0]}"
+
+    return "Verwendete Seiten: " + ", ".join(str(s) for s in eindeutige_seiten)
+
+
 def frage_beantworten(frage, relevanter_text):
     """Stellt die Frage zusammen mit dem relevanten PDF-Text an die KI."""
     antwort = client.responses.create(

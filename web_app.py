@@ -2,6 +2,7 @@ import streamlit as st
 from pypdf import PdfReader
 
 from pdf_logik import (
+    formatiere_seitenhinweis,
     frage_beantworten,
     pdf_seiten_extrahieren,
     relevante_seiten_ermitteln,
@@ -51,11 +52,10 @@ if hochgeladene_datei is not None:
         with st.chat_message("assistant"):
             st.write(eintrag["antwort"])
 
-            if "seiten" in eintrag:
-                st.caption(
-                    "Verwendete Seiten: "
-                    + ", ".join(map(str, eintrag["seiten"]))
-                )
+            seitenhinweis = formatiere_seitenhinweis(eintrag.get("seiten", []))
+
+            if seitenhinweis:
+                st.caption(seitenhinweis)
 
     frage = st.chat_input("Stelle eine Frage zur PDF...")
 
