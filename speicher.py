@@ -148,15 +148,26 @@ def dokumente_laden():
 def dokument_loeschen(dokument_id):
     """Entfernt ein Dokument samt Chunks (Kaskade) und seiner PDF-Kopie.
 
-    Referenzen auf die gelöschte Dokument-ID in `chats.dokument_ids`
-    werden nicht aktiv bereinigt, sondern beim Laden eines Chats
-    (`chat_laden`) automatisch herausgefiltert.
+    Bereinigt außerdem aktiv die Referenz auf diese Dokument-ID in
+    `chats.dokument_ids` für alle Chats (nicht nur lazy beim nächsten
+    Laden, siehe zusätzlich die Filterung in `chat_laden` als
+    Absicherung für evtl. ältere Datenstände).
     """
     with _verbindung() as conn:
         zeile = conn.execute(
             "SELECT hash FROM dokumente WHERE id = ?", (dokument_id,)
         ).fetchone()
         conn.execute("DELETE FROM dokumente WHERE id = ?", (dokument_id,))
+
+        for chat_zeile in conn.execute("SELECT id, dokument_ids FROM chats").fetchall():
+            vorhandene_ids = json.loads(chat_zeile["dokument_ids"])
+
+            if dokument_id in vorhandene_ids:
+                bereinigte_ids = [i for i in vorhandene_ids if i != dokument_id]
+                conn.execute(
+                    "UPDATE chats SET dokument_ids = ? WHERE id = ?",
+                    (json.dumps(bereinigte_ids), chat_zeile["id"]),
+                )
 
     if zeile:
         (PDF_ORDNER / f"{zeile['hash']}.pdf").unlink(missing_ok=True)
