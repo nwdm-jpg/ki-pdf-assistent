@@ -50,6 +50,18 @@ h1, h2, h3 {
 [class*="st-key-home_karte_"] p {
     text-align: center;
 }
+
+/* Sidebar-Navigation: "Startseite" etwas größer/prominenter als die
+   übrigen Bereiche, aber weiterhin derselbe Button-Typ (nur größer). */
+[class*="st-key-nav_gross_"] button {
+    font-size: 1.05rem;
+    font-weight: 600;
+    padding-top: 0.7rem;
+    padding-bottom: 0.7rem;
+}
+[class*="st-key-nav_gross_"] {
+    margin-bottom: 0.5rem;
+}
 </style>
 """
 
@@ -93,6 +105,31 @@ def modus_karte(icon, titel, beschreibung, button_label, key, deaktiviert=False,
 
         if deaktiviert and deaktiviert_hinweis:
             st.caption(deaktiviert_hinweis)
+
+    return geklickt
+
+
+def nav_eintrag(label, aktiv, key, gross=False):
+    """Ein einzelner Eintrag der Sidebar-Hauptnavigation.
+
+    Zeigt den aktiven Bereich über den Button-Typ an (primary/secondary)
+    - dieselbe Logik, die bereits für die Chat-Liste genutzt wird, damit
+    kein zweites Auswahl-Konzept entsteht. `gross=True` (z. B. für
+    "Startseite") macht den Eintrag über eine `key`-basierte CSS-Klasse
+    sichtbar größer/prominenter als die übrigen, bleibt aber derselbe
+    Button-Typ - keine separate Mini-Optik.
+
+    Gibt True zurück, wenn der Eintrag in diesem Lauf angeklickt wurde.
+    """
+    container_key = f"nav_gross_{key}" if gross else f"nav_{key}"
+
+    with st.container(key=container_key):
+        geklickt = st.button(
+            label,
+            key=f"nav_button_{key}",
+            use_container_width=True,
+            type="primary" if aktiv else "secondary",
+        )
 
     return geklickt
 

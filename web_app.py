@@ -1,9 +1,10 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import streamlit as st
 from pypdf import PdfReader
 
 import analyse
+import dokumentbibliothek
 import komponenten
 import pdf_verarbeitung
 import pruefung
@@ -21,7 +22,6 @@ BEREICH_START = "🏠 Startseite"
 BEREICH_CHAT = "💬 Chat"
 BEREICH_ANALYSE = "🔍 Analyse & Vergleich"
 BEREICH_PRUEFUNG = "🛡️ Dokument prüfen"
-BEREICHE = [BEREICH_START, BEREICH_CHAT, BEREICH_ANALYSE, BEREICH_PRUEFUNG]
 
 
 st.set_page_config(
@@ -42,18 +42,15 @@ if "aktueller_chat_id" not in st.session_state:
         vorhandene_chats[0]["id"] if vorhandene_chats else speicher.chat_erstellen()
     )
 
+# Bewusst eine reine Session-State-Variable (nicht an ein einzelnes
+# Widget gebunden): Die Navigation besteht aus mehreren Buttons
+# (Sidebar-Haupt-Navigation UND die großen Startseiten-Karten), die alle
+# denselben Zustand setzen können sollen. Ein Widget-gebundener Key
+# (z. B. bei st.radio) ließe sich nach dessen Instanziierung im selben
+# Lauf nicht mehr direkt setzen - als reine Variable ist das problemlos
+# möglich, gefolgt von st.rerun().
 if "aktiver_bereich" not in st.session_state:
     st.session_state.aktiver_bereich = BEREICH_START
-
-# Ermöglicht Navigation per Button-Klick (z. B. die großen Startseiten-
-# Karten): Der Bereichswechsel wird über einen separaten, nicht an ein
-# Widget gebundenen Key angefordert und HIER - vor der Instanziierung
-# des Sidebar-Radios weiter unten - angewendet. Ein direktes Setzen von
-# st.session_state.aktiver_bereich aus dem Hauptbereich heraus würde
-# scheitern, da das Radio-Widget mit diesem Key in diesem Lauf bereits
-# vorher gerendert worden wäre.
-if "_bereich_wechsel" in st.session_state:
-    st.session_state.aktiver_bereich = st.session_state.pop("_bereich_wechsel")
 
 
 def dateien_verarbeiten(dateien):
@@ -123,12 +120,23 @@ def _pruefung_starten(modus, icon, titel, funktion, dokument_ids):
 with st.sidebar:
     st.markdown("## 📄 KI-PDF-Assistent")
 
-    bereich = st.radio(
-        "Bereich",
-        BEREICHE,
-        key="aktiver_bereich",
-        label_visibility="collapsed",
-    )
+    bereich = st.session_state.aktiver_bereich
+
+    # Startseite bewusst größer/prominenter als die übrigen drei
+    # Bereiche (gleicher Button-Typ, nur über `gross=True` optisch
+    # hervorgehoben) - sie ist der primäre Einstiegspunkt der App.
+    if komponenten.nav_eintrag(BEREICH_START, aktiv=bereich == BEREICH_START, key="start", gross=True):
+        st.session_state.aktiver_bereich = BEREICH_START
+        st.rerun()
+
+    for ziel, key_suffix in (
+        (BEREICH_CHAT, "chat"),
+        (BEREICH_ANALYSE, "analyse"),
+        (BEREICH_PRUEFUNG, "pruefung"),
+    ):
+        if komponenten.nav_eintrag(ziel, aktiv=bereich == ziel, key=key_suffix):
+            st.session_state.aktiver_bereich = ziel
+            st.rerun()
 
     st.divider()
 
@@ -202,30 +210,95 @@ with st.sidebar:
     if not dokumente:
         komponenten.leerer_zustand("Noch keine Dokumente in der Bibliothek.")
     else:
+        wort = "Dokument" if len(dokumente) == 1 else "Dokumente"
+        kopf_text = f"{len(dokumente)} {wort}"
+
         if chat_bereich:
-            st.caption(
-                f"{len(aktive_dokument_ids)} von {len(dokumente)} Dokumenten "
-                "für diesen Chat ausgewählt."
-            )
-        else:
-            wort = "Dokument" if len(dokumente) == 1 else "Dokumente"
-            st.caption(f"{len(dokumente)} {wort} in der Bibliothek.")
+            kopf_text += f" · {len(aktive_dokument_ids)} aktiv"
 
-        suchbegriff = ""
-        if len(dokumente) > 5:
-            suchbegriff = st.text_input(
-                "Dokumente durchsuchen",
-                placeholder="🔍 Dokument suchen...",
+        st.caption(kopf_text)
+
+        suchbegriff = st.text_input(
+            "Dokumente durchsuchen",
+            placeholder="🔍 Dokumente durchsuchen",
+            label_visibility="collapsed",
+            key="bibliothek_suchbegriff",
+        ).strip()
+
+        sortierung = st.selectbox(
+            "Sortierung",
+            options=dokumentbibliothek.SORTIERUNGEN,
+            label_visibility="collapsed",
+            key="bibliothek_sortierung",
+        )
+
+        datumsfilter = st.selectbox(
+            "Zeitraum",
+            options=dokumentbibliothek.DATUMSFILTER,
+            label_visibility="collapsed",
+            key="bibliothek_datumsfilter",
+        )
+
+        benutzerdefiniert_von = None
+        benutzerdefiniert_bis = None
+
+        if datumsfilter == dokumentbibliothek.DATUMSFILTER_BENUTZERDEFINIERT:
+            heute = datetime.now().date()
+            datumsbereich = st.date_input(
+                "Zeitraum wählen",
+                value=(heute - timedelta(days=7), heute),
                 label_visibility="collapsed",
-            ).strip().lower()
+                key="bibliothek_datumsbereich",
+            )
+            if isinstance(datumsbereich, tuple) and len(datumsbereich) == 2:
+                benutzerdefiniert_von, benutzerdefiniert_bis = datumsbereich
 
-        angezeigte_dokumente = [
-            dokument
-            for dokument in dokumente
-            if suchbegriff in dokument["dateiname"].lower()
-        ]
+        # Der Auswahlstatus-Filter ist nur im Chat-Bereich sinnvoll, da nur
+        # dort eine Sidebar-Auswahl existiert (Analyse/Prüfung wählen im
+        # Hauptbereich aus). Eigene, vom Widget-Key getrennte Session-
+        # State-Variable, damit der Filter erhalten bleibt, auch wenn das
+        # Widget beim Wechsel in einen anderen Bereich kurzzeitig nicht
+        # gerendert wird.
+        if chat_bereich:
+            if "bibliothek_auswahlfilter" not in st.session_state:
+                st.session_state.bibliothek_auswahlfilter = dokumentbibliothek.AUSWAHLFILTER_ALLE
 
-        if suchbegriff and not angezeigte_dokumente:
+            auswahlfilter = st.selectbox(
+                "Auswahlstatus",
+                options=dokumentbibliothek.AUSWAHLFILTER,
+                index=dokumentbibliothek.AUSWAHLFILTER.index(
+                    st.session_state.bibliothek_auswahlfilter
+                ),
+                label_visibility="collapsed",
+                key="bibliothek_auswahlfilter_widget",
+            )
+            st.session_state.bibliothek_auswahlfilter = auswahlfilter
+        else:
+            auswahlfilter = dokumentbibliothek.AUSWAHLFILTER_ALLE
+
+        gefilterte_dokumente = dokumentbibliothek.dokumente_filtern(
+            dokumente,
+            suchbegriff=suchbegriff,
+            datumsfilter=datumsfilter,
+            benutzerdefiniert_von=benutzerdefiniert_von,
+            benutzerdefiniert_bis=benutzerdefiniert_bis,
+            aktive_ids=aktive_dokument_ids if chat_bereich else None,
+            auswahlfilter=auswahlfilter,
+        )
+        angezeigte_dokumente = dokumentbibliothek.dokumente_sortieren(
+            gefilterte_dokumente, sortierung
+        )
+
+        gefiltert_aktiv = (
+            suchbegriff
+            or datumsfilter != dokumentbibliothek.DATUMSFILTER_ALLE
+            or (chat_bereich and auswahlfilter != dokumentbibliothek.AUSWAHLFILTER_ALLE)
+        )
+
+        if gefiltert_aktiv:
+            st.caption(f"{len(angezeigte_dokumente)} von {len(dokumente)} Dokumenten angezeigt")
+
+        if not angezeigte_dokumente:
             st.caption("Keine Dokumente gefunden.")
 
         for dokument in angezeigte_dokumente:
@@ -244,21 +317,18 @@ with st.sidebar:
                         value=dokument_id in aktive_dokument_ids,
                         key=checkbox_key,
                     )
-                    status = (
-                        "✅ Aktiv in diesem Chat"
-                        if ausgewaehlt
-                        else "Nicht ausgewählt"
-                    )
                 else:
                     st.markdown(f"**{dokument['dateiname']}**")
-                    status = None
+                    ausgewaehlt = None
 
-                meta_text = f"{dokument['seitenzahl']} {seiten_wort} · hochgeladen am {hochgeladen_am}"
-                if status:
-                    meta_text = f"{status} · {meta_text}"
+                st.caption(f"{dokument['seitenzahl']} {seiten_wort} · hochgeladen am {hochgeladen_am}")
 
-                spalte_meta, spalte_loeschen = st.columns([5, 1])
-                spalte_meta.caption(meta_text)
+                spalte_status, spalte_loeschen = st.columns([5, 1])
+
+                if chat_bereich:
+                    spalte_status.caption(
+                        "✅ Aktiv in diesem Chat" if ausgewaehlt else "Nicht ausgewählt"
+                    )
 
                 with spalte_loeschen.popover("🗑"):
                     st.write(f"„{dokument['dateiname']}“ entfernen?")
@@ -277,8 +347,9 @@ with st.sidebar:
 
         if chat_bereich:
             # Auswahl über ALLE Dokumente auswerten (nicht nur die
-            # aktuell sichtbaren), damit ein aktiver Suchfilter die
-            # Auswahl gerade ausgeblendeter Dokumente nicht verwirft.
+            # aktuell sichtbaren/gefilterten), damit Suche, Sortierung
+            # und Filter die Auswahl gerade ausgeblendeter Dokumente
+            # niemals verwerfen.
             neue_aktive_ids = {
                 dokument["id"]
                 for dokument in dokumente
@@ -307,7 +378,7 @@ if bereich == BEREICH_START:
             "Chat starten",
             key="chat",
         ):
-            st.session_state["_bereich_wechsel"] = BEREICH_CHAT
+            st.session_state.aktiver_bereich = BEREICH_CHAT
             st.rerun()
 
     with spalte_analyse:
@@ -318,7 +389,7 @@ if bereich == BEREICH_START:
             "Analyse starten",
             key="analyse",
         ):
-            st.session_state["_bereich_wechsel"] = BEREICH_ANALYSE
+            st.session_state.aktiver_bereich = BEREICH_ANALYSE
             st.rerun()
 
     with spalte_pruefung:
@@ -329,7 +400,7 @@ if bereich == BEREICH_START:
             "Dokument prüfen",
             key="pruefung",
         ):
-            st.session_state["_bereich_wechsel"] = BEREICH_PRUEFUNG
+            st.session_state.aktiver_bereich = BEREICH_PRUEFUNG
             st.rerun()
 
     st.divider()
@@ -595,7 +666,7 @@ elif bereich == BEREICH_ANALYSE:
 
 else:  # BEREICH_PRUEFUNG
     komponenten.seiten_kopf(
-        BEREICH_PRUEFUNG,
+        "Dokument prüfen",
         "Lass wichtige Stellen, Risiken, Pflichten und Fristen automatisch prüfen.",
     )
 
