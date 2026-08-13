@@ -1,0 +1,13 @@
+# Design-System der KI-PDF-Assistent-App: Dunkles Theme mit einer
+# einheitlichen Akzentfarbe sowie konsistenten Radien/Rahmen für alle
+# Karten, Buttons und Eingabefelder. Bewusst über Streamlits natives
+# Theming statt über CSS-Overrides gelöst (siehe auch komponenten.py für
+# die wenigen strukturellen CSS-Ergänzungen, die config.toml nicht
+# abdecken kann, z. B. die Mindesthöhe der Startseiten-Karten).
+[theme]
+base = "dark"
+primaryColor = "#6366F1"
+baseRadius = "large"
+buttonRadius = "large"
+showWidgetBorder = true
+showSidebarBorder = true

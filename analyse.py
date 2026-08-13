@@ -4,31 +4,16 @@ Eigenständiges Modul für den "Analyse & Vergleich"-Bereich von
 web_app.py: Zusammenfassen, Vergleichen, Fristen-Extraktion und
 Risikoanalyse über beliebig viele Dokumente aus der Bibliothek.
 
-Nutzt bewusst dieselbe Infrastruktur wie der Chat, statt eigene Logik
-aufzubauen:
-- `speicher.chunks_laden` für bereits gespeicherte Chunks + Embeddings
-  (keine erneute Embedding-Erzeugung).
-- `retrieval.relevante_chunks_ermitteln` für die semantische Auswahl der
-  relevantesten Ausschnitte je Dokument (begrenzt Kontextgröße/Kosten,
-  statt ganze PDFs an das Modell zu senden).
-- `pdf_logik.relevanten_text_zusammenstellen` / `verwendete_quellen` /
-  `formatiere_quellenhinweis` für Prompt-Aufbau und Quellenangaben,
-  sowie den gemeinsamen OpenAI-Client (`pdf_logik.client`).
+Die eigentliche Retrieval-/Prompt-/API-Logik lebt in `ki_analyse.py` und
+wird auch von `pruefung.py` (Dokument prüfen) genutzt - dieses Modul
+liefert nur die Analyse-spezifischen Systemprompts und Suchanfragen.
 
 Da eine Analyse (anders als eine Chat-Frage) keine konkrete Nutzerfrage
 hat, dient je Analyseart eine feste, themenbezogene "Suchanfrage" als
 Grundlage für die Embedding-Suche.
 """
 
-import speicher
-from pdf_logik import (
-    MODELL,
-    client,
-    formatiere_quellenhinweis,
-    relevanten_text_zusammenstellen,
-    verwendete_quellen,
-)
-from retrieval import relevante_chunks_ermitteln
+import ki_analyse
 
 
 # Wie viele Chunks je Dokument maximal in eine Analyse einfließen.
@@ -43,25 +28,9 @@ RISIKEN_HINWEIS = (
     "ersetzt keine rechtliche, finanzielle oder professionelle Beratung."
 )
 
-_QUELLENFORMAT_HINWEIS = (
-    'Belege wichtige Aussagen direkt im Text mit der Quelle im Format '
-    '"(Quelle: Dateiname, Seite X)", basierend auf den Kennzeichnungen '
-    "der Dokumentausschnitte. Nutze ausschließlich die bereitgestellten "
-    "Ausschnitte als Informationsquelle und erfinde keine Informationen, "
-    "Daten oder Quellenangaben."
-)
-
-# Gemeinsame Kürze-/Struktur-Vorgabe für alle vier Analysearten, damit
-# die Ergebnisse sich einheitlich lesen (gleiche Überschriften, kompakt
-# statt ausschweifend) und auf einen Blick erfassbar bleiben. Wer mehr
+# Gemeinsame Struktur-Vorgabe für alle vier Analysearten, damit die
+# Ergebnisse sich einheitlich lesen (gleiche Überschriften). Wer mehr
 # Detail möchte, kann in der Rückfragen-Chat nachfragen.
-_KUERZE_HINWEIS = (
-    "Antworte sehr knapp: keine lange Einleitung, keine Wiederholungen, "
-    "keine ausschweifende oder juristisch anmutende Sprache. Nutze kurze "
-    "Stichpunkte und, wo sinnvoll, kompakte Tabellen statt Fließtext. Das "
-    "Ergebnis soll ohne langes Scrollen erfassbar sein - Details kann der "
-    "Nutzer in einer Rückfrage erfragen."
-)
 _STRUKTUR_HINWEIS = (
     "Gliedere die Antwort so:\n"
     "## Kernergebnis\n"
@@ -82,8 +51,8 @@ ZUSAMMENFASSEN_SYSTEM = (
     "Überschrift) mit jeweils Kernergebnis + wichtigsten Punkten "
     "(Bedingungen, Beträge, Pflichten, auffällige Klauseln - nur was im "
     "Text belegt und relevant ist).\n\n"
-    f"{_KUERZE_HINWEIS}\n\n{_STRUKTUR_HINWEIS}\n\n"
-    f"{_QUELLENFORMAT_HINWEIS} Antworte auf Deutsch in Markdown."
+    f"{ki_analyse.KUERZE_HINWEIS}\n\n{_STRUKTUR_HINWEIS}\n\n"
+    f"{ki_analyse.QUELLENFORMAT_HINWEIS} Antworte auf Deutsch in Markdown."
 )
 
 VERGLEICHEN_SUCHANFRAGE = (
@@ -93,7 +62,7 @@ VERGLEICHEN_SUCHANFRAGE = (
 VERGLEICHEN_SYSTEM = (
     "Du vergleichst mehrere Dokumente knapp anhand der bereitgestellten "
     "Ausschnitte.\n\n"
-    f"{_KUERZE_HINWEIS}\n\n"
+    f"{ki_analyse.KUERZE_HINWEIS}\n\n"
     "Gliedere die Antwort so:\n"
     "## Kernergebnis\n"
     "1-2 Sätze: die wichtigste Erkenntnis des Vergleichs.\n\n"
@@ -106,7 +75,7 @@ VERGLEICHEN_SYSTEM = (
     "zu der die Ausschnitte nichts hergeben.\n\n"
     "## Wichtigste Unterschiede\n"
     "Nur die bedeutendsten Unterschiede als kurze Stichpunkte.\n\n"
-    f"{_QUELLENFORMAT_HINWEIS} Antworte auf Deutsch."
+    f"{ki_analyse.QUELLENFORMAT_HINWEIS} Antworte auf Deutsch."
 )
 
 FRISTEN_SUCHANFRAGE = (
@@ -121,14 +90,14 @@ FRISTEN_SYSTEM = (
     "Erfinde keine Daten oder Fristen, die nicht im Text belegt sind. "
     "Wenn ein Dokument keine erkennbaren Fristen enthält, erwähne das "
     "in einem kurzen Halbsatz statt etwas zu erfinden.\n\n"
-    f"{_KUERZE_HINWEIS}\n\n"
+    f"{ki_analyse.KUERZE_HINWEIS}\n\n"
     "Gliedere die Antwort so:\n"
     "## Kernergebnis\n"
     "1 Satz: wichtigste bzw. nächste Frist.\n\n"
     "## Wichtigste Punkte\n"
     "Kompakte, wo möglich chronologisch geordnete Stichpunkte (frühester "
     "Termin zuerst) oder eine Tabelle, gruppiert nach Dokument.\n\n"
-    f"{_QUELLENFORMAT_HINWEIS} Antworte auf Deutsch in Markdown."
+    f"{ki_analyse.QUELLENFORMAT_HINWEIS} Antworte auf Deutsch in Markdown."
 )
 
 RISIKEN_SUCHANFRAGE = (
@@ -146,28 +115,20 @@ RISIKEN_SYSTEM = (
     "hervor - formuliere entsprechend vorsichtig (z. B. \"könnte "
     "relevant sein\", \"sollte geprüft werden\") statt abschließende "
     "Bewertungen abzugeben.\n\n"
-    f"{_KUERZE_HINWEIS}\n\n"
+    f"{ki_analyse.KUERZE_HINWEIS}\n\n"
     "Gliedere die Antwort so:\n"
     "## Kernergebnis\n"
     "1 Satz: das auffälligste Risiko.\n\n"
     "## Wichtigste Punkte\n"
     "Kompakte Stichpunkte, gruppiert nach Dokument.\n\n"
-    f"{_QUELLENFORMAT_HINWEIS} Antworte auf Deutsch in Markdown."
+    f"{ki_analyse.QUELLENFORMAT_HINWEIS} Antworte auf Deutsch in Markdown."
 )
 
 
-def _relevante_ausschnitte(dokument_ids, suchanfrage):
-    chunks = speicher.chunks_laden(dokument_ids)
-    return relevante_chunks_ermitteln(
-        suchanfrage, chunks, anzahl_pro_dokument=CHUNKS_PRO_DOKUMENT
-    )
-
-
 def _analyse_durchfuehren(system_text, suchanfrage, dokument_ids):
-    if not dokument_ids:
-        raise ValueError("Es wurden keine Dokumente für die Analyse ausgewählt.")
-
-    ausschnitte = _relevante_ausschnitte(dokument_ids, suchanfrage)
+    ausschnitte = ki_analyse.ausschnitte_ermitteln(
+        dokument_ids, suchanfrage, CHUNKS_PRO_DOKUMENT
+    )
 
     if not ausschnitte:
         raise ValueError(
@@ -175,25 +136,7 @@ def _analyse_durchfuehren(system_text, suchanfrage, dokument_ids):
             "gefunden werden."
         )
 
-    relevanter_text = relevanten_text_zusammenstellen(ausschnitte)
-
-    nachrichten = [
-        {"role": "system", "content": system_text},
-        {
-            "role": "user",
-            "content": f"Dokumentausschnitte:\n{relevanter_text}",
-        },
-    ]
-
-    antwort = client.responses.create(model=MODELL, input=nachrichten)
-
-    quellen = verwendete_quellen(ausschnitte)
-
-    return {
-        "text": antwort.output_text,
-        "quellen": quellen,
-        "quellenhinweis": formatiere_quellenhinweis(quellen),
-    }
+    return ki_analyse.ki_anfrage(system_text, ausschnitte)
 
 
 def zusammenfassen(dokument_ids):
@@ -228,73 +171,15 @@ def risiken_ermitteln(dokument_ids):
 def rueckfrage_beantworten(analyse_ergebnis_text, dokument_ids, frage, verlauf=None):
     """Beantwortet eine Rückfrage zu einem bereits erstellten Analyseergebnis.
 
-    Getrennt von `pdf_logik.frage_beantworten` (normaler Chat), damit der
-    Rückfragen-Verlauf innerhalb der Analyse-Arbeitsfläche eigenständig
-    bleibt und nicht mit normalen Chat-Konversationen vermischt wird.
-
-    Nutzt wie der normale Chat semantische Suche über die Chunks der
-    Analyse-Dokumente (Grundlage für Faktentreue + Quellen), zusätzlich
-    aber das bisherige Analyseergebnis als Kontext, damit sich Fragen wie
-    "Welche dieser Fristen ist am wichtigsten?" auf das Ergebnis beziehen
-    können statt nur auf den rohen Dokumenttext.
-
-    `verlauf` ist optional eine Liste bisheriger Rückfragen
-    ({"frage", "antwort"}) dieser Analyse-Sitzung.
+    Getrennt von `pdf_logik.frage_beantworten` (normaler Chat) und von
+    `pruefung.rueckfrage_beantworten` (Dokument prüfen), damit die drei
+    Rückfragen-/Chat-Verläufe nicht vermischt werden - siehe
+    `ki_analyse.rueckfrage_beantworten` für die gemeinsame Umsetzung.
     """
-    if not dokument_ids:
-        raise ValueError("Es sind keine Dokumente für diese Analyse ausgewählt.")
-
-    verlauf = verlauf or []
-
-    zusatzkontext = "\n".join(
-        f"{eintrag['frage']} {eintrag['antwort']}" for eintrag in verlauf[-2:]
-    )
-
-    anzahl_dokumente = len(dokument_ids)
-    anzahl_pro_dokument = 4 if anzahl_dokumente == 1 else max(2, 8 // anzahl_dokumente)
-
-    chunks = speicher.chunks_laden(dokument_ids)
-    ausschnitte = relevante_chunks_ermitteln(
+    return ki_analyse.rueckfrage_beantworten(
+        analyse_ergebnis_text,
+        dokument_ids,
         frage,
-        chunks,
-        anzahl_pro_dokument=anzahl_pro_dokument,
-        zusatzkontext=zusatzkontext,
+        verlauf=verlauf,
+        kontext_label="Analyseergebnis",
     )
-    relevanter_text = (
-        relevanten_text_zusammenstellen(ausschnitte)
-        if ausschnitte
-        else "(keine passenden Ausschnitte gefunden)"
-    )
-
-    system_text = (
-        "Du beantwortest Rückfragen zu einer bereits erstellten "
-        "Dokumentanalyse. Nutze das folgende Analyseergebnis als Kontext "
-        "und die bereitgestellten Dokumentausschnitte als "
-        f"Faktengrundlage.\n\nAnalyseergebnis:\n{analyse_ergebnis_text}\n\n"
-        f"{_KUERZE_HINWEIS} Nutze den bisherigen Rückfrage-Verlauf nur, "
-        "um Bezüge einzuordnen, nicht als zusätzliche Wissensquelle. "
-        f"{_QUELLENFORMAT_HINWEIS} Antworte auf Deutsch."
-    )
-
-    nachrichten = [{"role": "system", "content": system_text}]
-
-    for eintrag in verlauf[-6:]:
-        nachrichten.append({"role": "user", "content": eintrag["frage"]})
-        nachrichten.append({"role": "assistant", "content": eintrag["antwort"]})
-
-    nachrichten.append(
-        {
-            "role": "user",
-            "content": f"Dokumentausschnitte:\n{relevanter_text}\n\nRückfrage: {frage}",
-        }
-    )
-
-    antwort = client.responses.create(model=MODELL, input=nachrichten)
-
-    quellen = verwendete_quellen(ausschnitte)
-
-    return {
-        "text": antwort.output_text,
-        "quellen": quellen,
-        "quellenhinweis": formatiere_quellenhinweis(quellen),
-    }
