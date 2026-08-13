@@ -1,11 +1,12 @@
 import streamlit as st
 from pypdf import PdfReader
 
+import pdf_verarbeitung
+import retrieval
+import speicher
 from pdf_logik import (
     formatiere_quellenhinweis,
     frage_beantworten,
-    pdf_seiten_extrahieren,
-    relevante_seiten_ermitteln,
     relevanten_text_zusammenstellen,
     verwendete_quellen,
 )
@@ -40,16 +41,56 @@ st.markdown(
 )
 
 
-if "chat_verlauf" not in st.session_state:
-    st.session_state.chat_verlauf = []
+speicher.datenbank_initialisieren()
 
-if "dokumente" not in st.session_state:
-    st.session_state.dokumente = {}
+
+if "aktueller_chat_id" not in st.session_state:
+    vorhandene_chats = speicher.chat_liste()
+    st.session_state.aktueller_chat_id = (
+        vorhandene_chats[0]["id"] if vorhandene_chats else speicher.chat_erstellen()
+    )
 
 
 with st.sidebar:
     st.markdown("## 📄 KI-PDF-Assistent")
-    st.caption("Lade ein oder mehrere PDFs hoch und stelle Fragen dazu.")
+
+    if st.button("＋ Neuer Chat", use_container_width=True):
+        st.session_state.aktueller_chat_id = speicher.chat_erstellen()
+        st.rerun()
+
+    st.markdown("#### Chats")
+
+    chats = speicher.chat_liste()
+
+    for chat in chats:
+        ist_aktiv = chat["id"] == st.session_state.aktueller_chat_id
+        spalte_titel, spalte_loeschen = st.columns([5, 1])
+
+        if spalte_titel.button(
+            chat["titel"],
+            key=f"chat_{chat['id']}",
+            use_container_width=True,
+            type="primary" if ist_aktiv else "secondary",
+        ):
+            st.session_state.aktueller_chat_id = chat["id"]
+            st.rerun()
+
+        if spalte_loeschen.button("🗑", key=f"del_chat_{chat['id']}"):
+            speicher.chat_loeschen(chat["id"])
+
+            if ist_aktiv:
+                uebrige_chats = [c for c in chats if c["id"] != chat["id"]]
+                st.session_state.aktueller_chat_id = (
+                    uebrige_chats[0]["id"]
+                    if uebrige_chats
+                    else speicher.chat_erstellen()
+                )
+
+            st.rerun()
+
+    st.divider()
+    st.markdown("#### Dokumentbibliothek")
+    st.caption("Hochgeladene PDFs bleiben dauerhaft gespeichert.")
 
     hochgeladene_dateien = st.file_uploader(
         "PDF-Dateien hinzufügen",
@@ -57,139 +98,173 @@ with st.sidebar:
         accept_multiple_files=True,
     )
 
-    aktuelle_schluessel = set()
-
     for datei in hochgeladene_dateien or []:
-        schluessel = (datei.name, datei.size)
-        aktuelle_schluessel.add(schluessel)
+        pdf_bytes = datei.getvalue()
+        hash_wert = speicher.hash_berechnen(pdf_bytes)
 
-        if schluessel not in st.session_state.dokumente:
-            try:
-                reader = PdfReader(datei)
-            except Exception as fehler:
-                st.error(f"„{datei.name}“ konnte nicht gelesen werden.")
-                st.caption(f"Technische Details: {fehler}")
-                continue
+        if speicher.dokument_nach_hash(hash_wert):
+            continue
 
-            seiten = pdf_seiten_extrahieren(reader, datei.name)
-            st.session_state.dokumente[schluessel] = {
-                "name": datei.name,
-                "seiten": seiten,
-            }
+        try:
+            reader = PdfReader(datei)
+        except Exception as fehler:
+            st.error(f"„{datei.name}“ konnte nicht gelesen werden.")
+            st.caption(f"Technische Details: {fehler}")
+            continue
 
-    # Dokumente entfernen, die nicht mehr im Uploader ausgewählt sind.
-    st.session_state.dokumente = {
-        schluessel: dokument
-        for schluessel, dokument in st.session_state.dokumente.items()
-        if schluessel in aktuelle_schluessel
-    }
+        rohe_chunks = pdf_verarbeitung.dokument_chunks_erstellen(reader, datei.name)
 
-    if st.session_state.dokumente:
-        st.divider()
-        st.markdown(f"#### Dokumente ({len(st.session_state.dokumente)})")
+        if not rohe_chunks:
+            st.warning(f"„{datei.name}“ enthält keinen extrahierbaren Text.")
+            continue
 
-        for dokument in st.session_state.dokumente.values():
-            seiten = dokument["seiten"]
-            anzahl_zeichen = sum(len(eintrag["text"]) for eintrag in seiten)
+        try:
+            with st.spinner(f"Verarbeite „{datei.name}“..."):
+                embeddings = retrieval.embeddings_batch_erstellen(
+                    [chunk["text"] for chunk in rohe_chunks]
+                )
+                dokument_id = speicher.dokument_speichern(
+                    datei.name, hash_wert, pdf_bytes, len(reader.pages)
+                )
+                speicher.chunks_speichern(dokument_id, rohe_chunks, embeddings)
+        except Exception as fehler:
+            st.error(f"„{datei.name}“ konnte nicht verarbeitet werden.")
+            st.caption(f"Technische Details: {fehler}")
+            continue
 
-            with st.container(border=True):
-                st.markdown(f"**📄 {dokument['name']}**")
-                seiten_wort = "Seite" if len(seiten) == 1 else "Seiten"
-                st.caption(f"{len(seiten)} {seiten_wort} · {anzahl_zeichen} Zeichen")
+        st.success(f"„{datei.name}“ zur Bibliothek hinzugefügt.")
 
-                with st.expander("Extrahierten Text anzeigen"):
-                    voller_text = "\n".join(
-                        f"\n--- Seite {eintrag['seitennummer']} ---\n"
-                        f"{eintrag['text']}"
-                        for eintrag in seiten
-                    )
-                    st.text(voller_text)
+    dokumente = speicher.dokumente_laden()
+    aktueller_chat = speicher.chat_laden(st.session_state.aktueller_chat_id)
+    aktive_dokument_ids = set(aktueller_chat["dokument_ids"])
 
-    st.divider()
+    if dokumente:
+        neue_aktive_ids = set()
 
-    if st.button(
-        "🗑️ Chat leeren",
-        use_container_width=True,
-        disabled=not st.session_state.chat_verlauf,
-    ):
-        st.session_state.chat_verlauf = []
-        st.rerun()
+        for dokument in dokumente:
+            spalte_check, spalte_info, spalte_loeschen = st.columns([1, 4, 1])
+
+            ausgewaehlt = spalte_check.checkbox(
+                "aktiv",
+                value=dokument["id"] in aktive_dokument_ids,
+                key=f"aktiv_{dokument['id']}",
+                label_visibility="collapsed",
+            )
+
+            if ausgewaehlt:
+                neue_aktive_ids.add(dokument["id"])
+
+            seiten_wort = "Seite" if dokument["seitenzahl"] == 1 else "Seiten"
+            spalte_info.markdown(
+                f"**{dokument['dateiname']}**  \n"
+                f"{dokument['seitenzahl']} {seiten_wort} · "
+                f"{dokument['hochgeladen_am'][:10]}"
+            )
+
+            if spalte_loeschen.button("🗑", key=f"del_doc_{dokument['id']}"):
+                speicher.dokument_loeschen(dokument["id"])
+                st.rerun()
+
+        if neue_aktive_ids != aktive_dokument_ids:
+            speicher.chat_dokumente_setzen(
+                st.session_state.aktueller_chat_id, sorted(neue_aktive_ids)
+            )
+            st.rerun()
+    else:
+        st.caption("Noch keine Dokumente in der Bibliothek.")
 
 
-st.title("KI-PDF-Assistent")
+aktueller_chat = speicher.chat_laden(st.session_state.aktueller_chat_id)
+alle_dokumente = {dokument["id"]: dokument for dokument in speicher.dokumente_laden()}
+aktive_dokumente = [
+    alle_dokumente[i] for i in aktueller_chat["dokument_ids"] if i in alle_dokumente
+]
 
-if not st.session_state.dokumente:
+st.title(aktueller_chat["titel"])
+
+if not alle_dokumente:
     st.info("Lade links mindestens ein PDF hoch, um Fragen stellen zu können.")
-else:
-    st.caption(
-        "Stelle Fragen zu deinen hochgeladenen Dokumenten – auch "
-        "Rückfragen zum bisherigen Gespräch sind möglich."
+elif not aktive_dokumente:
+    st.info(
+        "Wähle links in der Dokumentbibliothek mindestens ein Dokument für "
+        "diesen Chat aus."
     )
+else:
+    aktive_namen = ", ".join(dokument["dateiname"] for dokument in aktive_dokumente)
+    st.caption(f"Aktive Dokumente: {aktive_namen}")
 
-    for eintrag in st.session_state.chat_verlauf:
+    for nachricht in aktueller_chat["nachrichten"]:
         with st.chat_message("user"):
-            st.write(eintrag["frage"])
+            st.write(nachricht["frage"])
 
         with st.chat_message("assistant"):
-            st.write(eintrag["antwort"])
+            st.write(nachricht["antwort"])
 
-            quellenhinweis = formatiere_quellenhinweis(eintrag.get("quellen", []))
+            quellenhinweis = formatiere_quellenhinweis(nachricht["quellen"])
 
             if quellenhinweis:
                 st.caption(quellenhinweis)
 
-    frage = st.chat_input("Stelle eine Frage zu deinen PDFs...")
+    frage = st.chat_input("Stelle eine Frage zu deinen Dokumenten...")
 
     if frage:
         with st.chat_message("user"):
             st.write(frage)
 
-        alle_seiten = [
-            eintrag
-            for dokument in st.session_state.dokumente.values()
-            for eintrag in dokument["seiten"]
-        ]
+        vorherige_nachrichten = aktueller_chat["nachrichten"]
 
-        # Die letzten Chatrunden fließen zusätzlich in die Seitensuche
+        # Die letzten Chatrunden fließen zusätzlich in die Chunk-Suche
         # ein, damit Rückfragen wie "Und wie ist das im zweiten Vertrag?"
-        # noch die passenden Seiten finden.
+        # noch die passenden Textstellen finden.
         zusatzkontext = "\n".join(
-            f"{eintrag['frage']} {eintrag['antwort']}"
-            for eintrag in st.session_state.chat_verlauf[-2:]
+            f"{nachricht['frage']} {nachricht['antwort']}"
+            for nachricht in vorherige_nachrichten[-2:]
         )
 
-        # Pro Dokument mehrere Seiten zulassen, aber bei vielen Dokumenten
-        # die Gesamtzahl der Auszüge im Prompt begrenzen. Jedes Dokument
-        # erhält so mindestens eine Chance, im Kontext zu erscheinen.
-        anzahl_dokumente = len(st.session_state.dokumente)
+        # Pro Dokument mehrere Chunks zulassen, aber bei vielen Dokumenten
+        # die Gesamtzahl der Auszüge im Prompt begrenzen. Jedes aktive
+        # Dokument erhält so mindestens eine Chance, im Kontext zu
+        # erscheinen.
+        anzahl_dokumente = len(aktive_dokumente)
         anzahl_pro_dokument = (
-            3 if anzahl_dokumente == 1 else max(1, 6 // anzahl_dokumente)
+            4 if anzahl_dokumente == 1 else max(2, 8 // anzahl_dokumente)
         )
-
-        beste_seiten = relevante_seiten_ermitteln(
-            frage,
-            alle_seiten,
-            anzahl=anzahl_pro_dokument,
-            zusatzkontext=zusatzkontext,
-        )
-        relevanter_text = relevanten_text_zusammenstellen(beste_seiten)
-        ausgewaehlte_quellen = verwendete_quellen(beste_seiten)
 
         try:
+            with st.spinner("Durchsuche deine Dokumente..."):
+                alle_chunks = speicher.chunks_laden(
+                    [dokument["id"] for dokument in aktive_dokumente]
+                )
+                beste_chunks = retrieval.relevante_chunks_ermitteln(
+                    frage,
+                    alle_chunks,
+                    anzahl_pro_dokument=anzahl_pro_dokument,
+                    zusatzkontext=zusatzkontext,
+                )
+
+            relevanter_text = relevanten_text_zusammenstellen(beste_chunks)
+            ausgewaehlte_quellen = verwendete_quellen(beste_chunks)
+
             with st.chat_message("assistant"):
-                with st.spinner("Die KI durchsucht deine Dokumente..."):
+                with st.spinner("Die KI beantwortet deine Frage..."):
                     antwort_text = frage_beantworten(
                         frage,
                         relevanter_text,
-                        verlauf=st.session_state.chat_verlauf[-6:],
+                        verlauf=vorherige_nachrichten[-6:],
                     )
 
-            st.session_state.chat_verlauf.append(
-                {
-                    "frage": frage,
-                    "antwort": antwort_text,
-                    "quellen": ausgewaehlte_quellen,
-                }
+                st.write(antwort_text)
+
+                quellenhinweis = formatiere_quellenhinweis(ausgewaehlte_quellen)
+
+                if quellenhinweis:
+                    st.caption(quellenhinweis)
+
+            speicher.nachricht_hinzufuegen(
+                st.session_state.aktueller_chat_id,
+                frage,
+                antwort_text,
+                ausgewaehlte_quellen,
             )
 
             st.rerun()
