@@ -1,18 +1,17 @@
 from datetime import datetime, timedelta
 
 import streamlit as st
-from pypdf import PdfReader
 
 import analyse
+import dokument_verarbeitung
 import dokumentbibliothek
 import komponenten
-import pdf_verarbeitung
 import pruefung
 import retrieval
 import speicher
-from pdf_logik import (
+from pdf_logik import frage_beantworten
+from quellen import (
     formatiere_quellenhinweis,
-    frage_beantworten,
     relevanten_text_zusammenstellen,
     verwendete_quellen,
 )
@@ -22,6 +21,7 @@ BEREICH_START = "🏠 Startseite"
 BEREICH_CHAT = "💬 Chat"
 BEREICH_ANALYSE = "🔍 Analyse & Vergleich"
 BEREICH_PRUEFUNG = "🛡️ Dokument prüfen"
+BEREICH_BIBLIOTHEK = "📚 Dokumentenbibliothek"
 
 
 st.set_page_config(
@@ -54,41 +54,52 @@ if "aktiver_bereich" not in st.session_state:
 
 
 def dateien_verarbeiten(dateien):
-    """Verarbeitet hochgeladene PDF-Dateien: Chunking, Embeddings, Speichern.
+    """Verarbeitet hochgeladene Dateien: Text extrahieren, chunken, Embeddings, Speichern.
 
-    Gemeinsam genutzt vom Sidebar-Uploader und dem Startseiten-Uploader,
-    damit es nur einen Verarbeitungsweg (und keine zweite
-    Speicherimplementierung) gibt.
+    Die einzige Verarbeitungs-/Speicherimplementierung der App - genutzt
+    vom Uploader in der Dokumentenbibliothek (BEREICH_BIBLIOTHEK), damit
+    es nur einen Verarbeitungsweg gibt. Die Formaterkennung (PDF, DOCX,
+    TXT, MD, CSV, XLSX, PPTX) übernimmt `dokument_verarbeitung`; nicht
+    unterstützte Dateitypen führen zu einer klaren deutschen
+    Fehlermeldung statt eines Absturzes.
     """
     for datei in dateien or []:
-        pdf_bytes = datei.getvalue()
-        hash_wert = speicher.hash_berechnen(pdf_bytes)
+        datei_bytes = datei.getvalue()
+        hash_wert = speicher.hash_berechnen(datei_bytes)
 
         if speicher.dokument_nach_hash(hash_wert):
             continue
 
         try:
-            reader = PdfReader(datei)
+            chunks, einheiten_anzahl, einheit_typ, dateityp = (
+                dokument_verarbeitung.dokument_verarbeiten(datei.name, datei_bytes)
+            )
+        except dokument_verarbeitung.NichtUnterstuetzterDateityp as fehler:
+            st.error(str(fehler))
+            continue
         except Exception as fehler:
             st.error(f"„{datei.name}“ konnte nicht gelesen werden.")
             st.caption(f"Technische Details: {fehler}")
             continue
 
-        rohe_chunks = pdf_verarbeitung.dokument_chunks_erstellen(reader, datei.name)
-
-        if not rohe_chunks:
+        if not chunks:
             st.warning(f"„{datei.name}“ enthält keinen extrahierbaren Text.")
             continue
 
         try:
             with st.spinner(f"Verarbeite „{datei.name}“..."):
                 embeddings = retrieval.embeddings_batch_erstellen(
-                    [chunk["text"] for chunk in rohe_chunks]
+                    [chunk["text"] for chunk in chunks]
                 )
                 dokument_id = speicher.dokument_speichern(
-                    datei.name, hash_wert, pdf_bytes, len(reader.pages)
+                    datei.name,
+                    hash_wert,
+                    datei_bytes,
+                    einheiten_anzahl,
+                    dateityp,
+                    einheit_typ,
                 )
-                speicher.chunks_speichern(dokument_id, rohe_chunks, embeddings)
+                speicher.chunks_speichern(dokument_id, chunks, embeddings)
         except Exception as fehler:
             st.error(f"„{datei.name}“ konnte nicht verarbeitet werden.")
             st.caption(f"Technische Details: {fehler}")
@@ -122,9 +133,9 @@ with st.sidebar:
 
     bereich = st.session_state.aktiver_bereich
 
-    # Startseite bewusst größer/prominenter als die übrigen drei
-    # Bereiche (gleicher Button-Typ, nur über `gross=True` optisch
-    # hervorgehoben) - sie ist der primäre Einstiegspunkt der App.
+    # Startseite bewusst größer/prominenter als die übrigen Bereiche
+    # (gleicher Button-Typ, nur über `gross=True` optisch hervorgehoben)
+    # - sie ist der primäre Einstiegspunkt der App.
     if komponenten.nav_eintrag(BEREICH_START, aktiv=bereich == BEREICH_START, key="start", gross=True):
         st.session_state.aktiver_bereich = BEREICH_START
         st.rerun()
@@ -133,6 +144,7 @@ with st.sidebar:
         (BEREICH_CHAT, "chat"),
         (BEREICH_ANALYSE, "analyse"),
         (BEREICH_PRUEFUNG, "pruefung"),
+        (BEREICH_BIBLIOTHEK, "bibliothek"),
     ):
         if komponenten.nav_eintrag(ziel, aktiv=bereich == ziel, key=key_suffix):
             st.session_state.aktiver_bereich = ziel
@@ -176,191 +188,37 @@ with st.sidebar:
                 st.rerun()
 
         st.divider()
+        st.markdown("#### 📄 Dokumente in diesem Chat")
 
-    st.markdown("#### 📤 Dokumente hinzufügen")
-    st.caption("PDFs werden dauerhaft in der Bibliothek gespeichert.")
-
-    hochgeladene_dateien = st.file_uploader(
-        "PDF-Dateien auswählen",
-        type=["pdf"],
-        accept_multiple_files=True,
-        key="sidebar_uploader",
-    )
-    dateien_verarbeiten(hochgeladene_dateien)
-
-    st.divider()
-    st.markdown("#### 📚 Dokumentenbibliothek")
-
-    dokumente = speicher.dokumente_laden()
-
-    # Im Chat-Bereich bestimmt der aktuelle Chat, welche Checkboxen als
-    # ausgewählt gelten. Die Checkbox-Keys sind bewusst pro Chat UND
-    # Dokument vergeben (statt nur pro Dokument), damit Streamlits
-    # eigener Widget-State beim Chatwechsel nicht die Auswahl eines
-    # anderen Chats "durchschlagen" lässt. In allen anderen Bereichen ist
-    # die Dokumentauswahl bewusst unabhängig davon (siehe Hauptbereich)
-    # und wird hier nur informativ, ohne Checkboxen, aufgelistet.
-    chat_bereich = bereich == BEREICH_CHAT
-
-    if chat_bereich:
         aktueller_chat_id = st.session_state.aktueller_chat_id
         aktueller_chat = speicher.chat_laden(aktueller_chat_id)
-        aktive_dokument_ids = set(aktueller_chat["dokument_ids"])
+        alle_dokumente_sidebar = speicher.dokumente_laden()
 
-    if not dokumente:
-        komponenten.leerer_zustand("Noch keine Dokumente in der Bibliothek.")
-    else:
-        wort = "Dokument" if len(dokumente) == 1 else "Dokumente"
-        kopf_text = f"{len(dokumente)} {wort}"
-
-        if chat_bereich:
-            kopf_text += f" · {len(aktive_dokument_ids)} aktiv"
-
-        st.caption(kopf_text)
-
-        suchbegriff = st.text_input(
-            "Dokumente durchsuchen",
-            placeholder="🔍 Dokumente durchsuchen",
-            label_visibility="collapsed",
-            key="bibliothek_suchbegriff",
-        ).strip()
-
-        sortierung = st.selectbox(
-            "Sortierung",
-            options=dokumentbibliothek.SORTIERUNGEN,
-            label_visibility="collapsed",
-            key="bibliothek_sortierung",
-        )
-
-        datumsfilter = st.selectbox(
-            "Zeitraum",
-            options=dokumentbibliothek.DATUMSFILTER,
-            label_visibility="collapsed",
-            key="bibliothek_datumsfilter",
-        )
-
-        benutzerdefiniert_von = None
-        benutzerdefiniert_bis = None
-
-        if datumsfilter == dokumentbibliothek.DATUMSFILTER_BENUTZERDEFINIERT:
-            heute = datetime.now().date()
-            datumsbereich = st.date_input(
-                "Zeitraum wählen",
-                value=(heute - timedelta(days=7), heute),
-                label_visibility="collapsed",
-                key="bibliothek_datumsbereich",
-            )
-            if isinstance(datumsbereich, tuple) and len(datumsbereich) == 2:
-                benutzerdefiniert_von, benutzerdefiniert_bis = datumsbereich
-
-        # Der Auswahlstatus-Filter ist nur im Chat-Bereich sinnvoll, da nur
-        # dort eine Sidebar-Auswahl existiert (Analyse/Prüfung wählen im
-        # Hauptbereich aus). Eigene, vom Widget-Key getrennte Session-
-        # State-Variable, damit der Filter erhalten bleibt, auch wenn das
-        # Widget beim Wechsel in einen anderen Bereich kurzzeitig nicht
-        # gerendert wird.
-        if chat_bereich:
-            if "bibliothek_auswahlfilter" not in st.session_state:
-                st.session_state.bibliothek_auswahlfilter = dokumentbibliothek.AUSWAHLFILTER_ALLE
-
-            auswahlfilter = st.selectbox(
-                "Auswahlstatus",
-                options=dokumentbibliothek.AUSWAHLFILTER,
-                index=dokumentbibliothek.AUSWAHLFILTER.index(
-                    st.session_state.bibliothek_auswahlfilter
-                ),
-                label_visibility="collapsed",
-                key="bibliothek_auswahlfilter_widget",
-            )
-            st.session_state.bibliothek_auswahlfilter = auswahlfilter
+        if not alle_dokumente_sidebar:
+            komponenten.leerer_zustand("Noch keine Dokumente in der Bibliothek.")
+            st.caption("Füge Dokumente über „📚 Dokumentenbibliothek“ hinzu.")
         else:
-            auswahlfilter = dokumentbibliothek.AUSWAHLFILTER_ALLE
+            # Session-Key ist bewusst pro Chat vergeben (nicht global),
+            # damit ein Chatwechsel im selben Lauf nicht die Auswahl
+            # eines anderen Chats überschreibt - vorbereitet mit dem
+            # gespeicherten Auswahlstand dieses Chats, bevor
+            # `dokument_mehrfachauswahl` (siehe komponenten.py, bereits
+            # von Analyse & Prüfung genutzt) sie initialisiert.
+            session_key = f"chat_dokument_ids_{aktueller_chat_id}"
 
-        gefilterte_dokumente = dokumentbibliothek.dokumente_filtern(
-            dokumente,
-            suchbegriff=suchbegriff,
-            datumsfilter=datumsfilter,
-            benutzerdefiniert_von=benutzerdefiniert_von,
-            benutzerdefiniert_bis=benutzerdefiniert_bis,
-            aktive_ids=aktive_dokument_ids if chat_bereich else None,
-            auswahlfilter=auswahlfilter,
-        )
-        angezeigte_dokumente = dokumentbibliothek.dokumente_sortieren(
-            gefilterte_dokumente, sortierung
-        )
+            if session_key not in st.session_state:
+                st.session_state[session_key] = list(aktueller_chat["dokument_ids"])
 
-        gefiltert_aktiv = (
-            suchbegriff
-            or datumsfilter != dokumentbibliothek.DATUMSFILTER_ALLE
-            or (chat_bereich and auswahlfilter != dokumentbibliothek.AUSWAHLFILTER_ALLE)
-        )
+            ausgewaehlte_ids = komponenten.dokument_mehrfachauswahl(
+                "Aktive Dokumente",
+                session_key=session_key,
+                widget_key=f"chat_dokument_ids_widget_{aktueller_chat_id}",
+                dokumente=alle_dokumente_sidebar,
+                hilfetext="Nur ausgewählte Dokumente fließen in die Antworten dieses Chats ein.",
+            )
 
-        if gefiltert_aktiv:
-            st.caption(f"{len(angezeigte_dokumente)} von {len(dokumente)} Dokumenten angezeigt")
-
-        if not angezeigte_dokumente:
-            st.caption("Keine Dokumente gefunden.")
-
-        for dokument in angezeigte_dokumente:
-            dokument_id = dokument["id"]
-
-            with st.container(border=True):
-                seiten_wort = "Seite" if dokument["seitenzahl"] == 1 else "Seiten"
-                hochgeladen_am = datetime.fromisoformat(
-                    dokument["hochgeladen_am"]
-                ).strftime("%d.%m.%Y")
-
-                if chat_bereich:
-                    checkbox_key = f"aktiv_{aktueller_chat_id}_{dokument_id}"
-                    ausgewaehlt = st.checkbox(
-                        f"**{dokument['dateiname']}**",
-                        value=dokument_id in aktive_dokument_ids,
-                        key=checkbox_key,
-                    )
-                else:
-                    st.markdown(f"**{dokument['dateiname']}**")
-                    ausgewaehlt = None
-
-                st.caption(f"{dokument['seitenzahl']} {seiten_wort} · hochgeladen am {hochgeladen_am}")
-
-                spalte_status, spalte_loeschen = st.columns([5, 1])
-
-                if chat_bereich:
-                    spalte_status.caption(
-                        "✅ Aktiv in diesem Chat" if ausgewaehlt else "Nicht ausgewählt"
-                    )
-
-                with spalte_loeschen.popover("🗑"):
-                    st.write(f"„{dokument['dateiname']}“ entfernen?")
-                    st.caption(
-                        "Löscht auch alle gespeicherten Textausschnitte und "
-                        "entfernt das Dokument aus allen Chats."
-                    )
-                    if st.button(
-                        "Endgültig löschen",
-                        key=f"confirm_del_{dokument_id}",
-                        type="primary",
-                        use_container_width=True,
-                    ):
-                        speicher.dokument_loeschen(dokument_id)
-                        st.rerun()
-
-        if chat_bereich:
-            # Auswahl über ALLE Dokumente auswerten (nicht nur die
-            # aktuell sichtbaren/gefilterten), damit Suche, Sortierung
-            # und Filter die Auswahl gerade ausgeblendeter Dokumente
-            # niemals verwerfen.
-            neue_aktive_ids = {
-                dokument["id"]
-                for dokument in dokumente
-                if st.session_state.get(
-                    f"aktiv_{aktueller_chat_id}_{dokument['id']}",
-                    dokument["id"] in aktive_dokument_ids,
-                )
-            }
-
-            if neue_aktive_ids != aktive_dokument_ids:
-                speicher.chat_dokumente_setzen(aktueller_chat_id, sorted(neue_aktive_ids))
+            if set(ausgewaehlte_ids) != set(aktueller_chat["dokument_ids"]):
+                speicher.chat_dokumente_setzen(aktueller_chat_id, ausgewaehlte_ids)
                 st.rerun()
 
 
@@ -418,20 +276,19 @@ if bereich == BEREICH_START:
             with spalte:
                 with st.container(border=True):
                     st.markdown(f"**{dokument['dateiname']}**")
-                    seiten_wort = "Seite" if dokument["seitenzahl"] == 1 else "Seiten"
-                    st.caption(f"{dokument['seitenzahl']} {seiten_wort}")
+                    st.caption(dokumentbibliothek.einheiten_text(dokument))
     else:
-        komponenten.leerer_zustand("Füge zuerst ein PDF zu deiner Dokumentenbibliothek hinzu.")
+        komponenten.leerer_zustand("Füge zuerst ein Dokument zu deiner Dokumentenbibliothek hinzu.")
 
-    st.markdown("##### 📤 Dokument hinzufügen")
-    home_dateien = st.file_uploader(
-        "PDF-Dateien auswählen",
-        type=["pdf"],
-        accept_multiple_files=True,
-        key="home_uploader",
-        label_visibility="collapsed",
-    )
-    dateien_verarbeiten(home_dateien)
+    if komponenten.modus_karte(
+        "📤",
+        "Dokument hinzufügen",
+        "Lade neue Dokumente hoch oder verwalte deine bestehende Bibliothek.",
+        "Zur Bibliothek",
+        key="home_bibliothek",
+    ):
+        st.session_state.aktiver_bereich = BEREICH_BIBLIOTHEK
+        st.rerun()
 
 
 elif bereich == BEREICH_CHAT:
@@ -444,7 +301,7 @@ elif bereich == BEREICH_CHAT:
     komponenten.seiten_kopf(aktueller_chat["titel"])
 
     if not alle_dokumente:
-        komponenten.leerer_zustand("Füge zuerst ein PDF zu deiner Dokumentenbibliothek hinzu.")
+        komponenten.leerer_zustand("Füge zuerst ein Dokument zu deiner Dokumentenbibliothek hinzu.")
     elif not aktive_dokumente:
         komponenten.leerer_zustand("Wähle Dokumente aus und stelle deine erste Frage.")
     else:
@@ -533,7 +390,7 @@ elif bereich == BEREICH_ANALYSE:
     alle_dokumente_liste = speicher.dokumente_laden()
 
     if not alle_dokumente_liste:
-        komponenten.leerer_zustand("Füge zuerst ein PDF zu deiner Dokumentenbibliothek hinzu.")
+        komponenten.leerer_zustand("Füge zuerst ein Dokument zu deiner Dokumentenbibliothek hinzu.")
     else:
         namen_je_id = {d["id"]: d["dateiname"] for d in alle_dokumente_liste}
 
@@ -664,7 +521,7 @@ elif bereich == BEREICH_ANALYSE:
             )
 
 
-else:  # BEREICH_PRUEFUNG
+elif bereich == BEREICH_PRUEFUNG:
     komponenten.seiten_kopf(
         "Dokument prüfen",
         "Lass wichtige Stellen, Risiken, Pflichten und Fristen automatisch prüfen.",
@@ -673,7 +530,7 @@ else:  # BEREICH_PRUEFUNG
     alle_dokumente_liste = speicher.dokumente_laden()
 
     if not alle_dokumente_liste:
-        komponenten.leerer_zustand("Füge zuerst ein PDF zu deiner Dokumentenbibliothek hinzu.")
+        komponenten.leerer_zustand("Füge zuerst ein Dokument zu deiner Dokumentenbibliothek hinzu.")
     else:
         namen_je_id = {d["id"]: d["dateiname"] for d in alle_dokumente_liste}
 
@@ -785,3 +642,148 @@ else:  # BEREICH_PRUEFUNG
                 "Frage zur Prüfung stellen...",
                 "💬 Rückfragen zur Prüfung",
             )
+
+
+else:  # BEREICH_BIBLIOTHEK
+    komponenten.seiten_kopf(
+        BEREICH_BIBLIOTHEK,
+        "Lade neue Dokumente hoch und verwalte deine bestehende Bibliothek.",
+    )
+
+    st.markdown("## 📤 Dokumente hinzufügen")
+    st.caption(
+        "Unterstützte Formate: "
+        + ", ".join(endung.upper() for endung in dokument_verarbeitung.SUPPORTED_EXTENSIONS)
+    )
+
+    bibliothek_dateien = st.file_uploader(
+        "Dateien auswählen",
+        type=dokument_verarbeitung.SUPPORTED_EXTENSIONS,
+        accept_multiple_files=True,
+        key="bibliothek_uploader",
+        label_visibility="collapsed",
+    )
+    dateien_verarbeiten(bibliothek_dateien)
+
+    st.divider()
+
+    alle_dokumente_bibliothek = speicher.dokumente_laden()
+    wort = "Dokument" if len(alle_dokumente_bibliothek) == 1 else "Dokumente"
+    st.markdown(f"## 📚 {len(alle_dokumente_bibliothek)} {wort} in deiner Bibliothek")
+
+    if not alle_dokumente_bibliothek:
+        komponenten.leerer_zustand("Noch keine Dokumente in der Bibliothek. Lade oben deine erste Datei hoch.")
+    else:
+        spalte_suche, spalte_sortierung, spalte_typ = st.columns([3, 2, 2])
+
+        suchbegriff = spalte_suche.text_input(
+            "Dokumente durchsuchen",
+            placeholder="🔍 Dokumente durchsuchen",
+            label_visibility="collapsed",
+            key="bibliothek_seite_suchbegriff",
+        ).strip()
+
+        sortierung = spalte_sortierung.selectbox(
+            "Sortierung",
+            options=dokumentbibliothek.SORTIERUNGEN,
+            label_visibility="collapsed",
+            key="bibliothek_seite_sortierung",
+        )
+
+        dateityp_filter = spalte_typ.selectbox(
+            "Dateityp",
+            options=dokumentbibliothek.dateitypen_optionen(alle_dokumente_bibliothek),
+            format_func=lambda t: (
+                t if t == dokumentbibliothek.DATEITYP_ALLE else dokumentbibliothek.dateityp_anzeige(t)
+            ),
+            label_visibility="collapsed",
+            key="bibliothek_seite_dateityp",
+        )
+
+        spalte_datum, spalte_datumsbereich = st.columns([2, 3])
+
+        datumsfilter = spalte_datum.selectbox(
+            "Zeitraum",
+            options=dokumentbibliothek.DATUMSFILTER,
+            label_visibility="collapsed",
+            key="bibliothek_seite_datumsfilter",
+        )
+
+        benutzerdefiniert_von = None
+        benutzerdefiniert_bis = None
+
+        if datumsfilter == dokumentbibliothek.DATUMSFILTER_BENUTZERDEFINIERT:
+            heute = datetime.now().date()
+            datumsbereich = spalte_datumsbereich.date_input(
+                "Zeitraum wählen",
+                value=(heute - timedelta(days=7), heute),
+                label_visibility="collapsed",
+                key="bibliothek_seite_datumsbereich",
+            )
+            if isinstance(datumsbereich, tuple) and len(datumsbereich) == 2:
+                benutzerdefiniert_von, benutzerdefiniert_bis = datumsbereich
+
+        gefilterte_dokumente = dokumentbibliothek.dokumente_filtern(
+            alle_dokumente_bibliothek,
+            suchbegriff=suchbegriff,
+            datumsfilter=datumsfilter,
+            benutzerdefiniert_von=benutzerdefiniert_von,
+            benutzerdefiniert_bis=benutzerdefiniert_bis,
+            dateityp_filter=dateityp_filter,
+        )
+        angezeigte_dokumente = dokumentbibliothek.dokumente_sortieren(
+            gefilterte_dokumente, sortierung
+        )
+
+        gefiltert_aktiv = (
+            suchbegriff
+            or datumsfilter != dokumentbibliothek.DATUMSFILTER_ALLE
+            or dateityp_filter != dokumentbibliothek.DATEITYP_ALLE
+        )
+
+        if gefiltert_aktiv:
+            st.caption(
+                f"{len(angezeigte_dokumente)} von {len(alle_dokumente_bibliothek)} "
+                "Dokumenten angezeigt"
+            )
+
+        if not angezeigte_dokumente:
+            komponenten.leerer_zustand("Keine Dokumente gefunden.")
+        else:
+            spalten = st.columns(2)
+
+            for index, dokument in enumerate(angezeigte_dokumente):
+                dokument_id = dokument["id"]
+                hochgeladen_am = datetime.fromisoformat(
+                    dokument["hochgeladen_am"]
+                ).strftime("%d.%m.%Y")
+                groesse = dokumentbibliothek.groesse_text(dokument)
+
+                with spalten[index % 2].container(border=True):
+                    st.markdown(f"**{dokument['dateiname']}**")
+                    st.caption(
+                        dokumentbibliothek.dateityp_anzeige(dokument.get("dateityp", "pdf"))
+                        + " · "
+                        + dokumentbibliothek.einheiten_text(dokument)
+                    )
+
+                    zusatz = f"Hochgeladen am {hochgeladen_am}"
+                    if groesse:
+                        zusatz += f" · {groesse}"
+                    st.caption(zusatz)
+                    st.caption("✅ Gespeichert")
+
+                    with st.popover("🗑 Löschen"):
+                        st.write(f"„{dokument['dateiname']}“ entfernen?")
+                        st.caption(
+                            "Löscht auch alle gespeicherten Textausschnitte und "
+                            "entfernt das Dokument aus allen Chats."
+                        )
+                        if st.button(
+                            "Endgültig löschen",
+                            key=f"bibliothek_confirm_del_{dokument_id}",
+                            type="primary",
+                            use_container_width=True,
+                        ):
+                            speicher.dokument_loeschen(dokument_id)
+                            st.rerun()

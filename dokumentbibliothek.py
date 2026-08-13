@@ -2,9 +2,9 @@
 
 Reine, von Streamlit unabhängige Hilfsfunktionen (`dokumente_filtern`,
 `dokumente_sortieren`) - leicht isoliert testbar, ohne UI-Abhängigkeit.
-Wird ausschließlich vom Sidebar-Bibliotheksbereich in web_app.py
-verwendet, damit dort keine Filter-/Sortierlogik direkt vermischt mit
-Streamlit-Aufrufen entsteht.
+Wird vom "📚 Dokumentenbibliothek"-Bereich in web_app.py verwendet,
+damit dort keine Filter-/Sortierlogik direkt mit Streamlit-Aufrufen
+vermischt wird.
 
 Wichtig: Diese Funktionen verändern nie die übergebenen Dokumente oder
 irgendwelche Auswahl-/Session-Zustände - Suche, Sortierung und Filter
@@ -14,13 +14,17 @@ sind rein präsentational und dürfen niemals gespeicherte Auswahlen
 
 from datetime import datetime, timedelta
 
+from quellen import EINHEIT_WOERTER
+
 
 SORTIERUNG_NEUESTE = "Neueste zuerst"
 SORTIERUNG_AELTESTE = "Älteste zuerst"
 SORTIERUNG_AZ = "A–Z"
 SORTIERUNG_ZA = "Z–A"
-SORTIERUNG_MEISTE_SEITEN = "Meiste Seiten zuerst"
-SORTIERUNG_WENIGSTE_SEITEN = "Wenigste Seiten zuerst"
+SORTIERUNG_MEISTE_SEITEN = "Meiste Einheiten zuerst"
+SORTIERUNG_WENIGSTE_SEITEN = "Wenigste Einheiten zuerst"
+SORTIERUNG_GROESSTE = "Größte zuerst"
+SORTIERUNG_KLEINSTE = "Kleinste zuerst"
 
 SORTIERUNGEN = [
     SORTIERUNG_NEUESTE,
@@ -29,7 +33,63 @@ SORTIERUNGEN = [
     SORTIERUNG_ZA,
     SORTIERUNG_MEISTE_SEITEN,
     SORTIERUNG_WENIGSTE_SEITEN,
+    SORTIERUNG_GROESSTE,
+    SORTIERUNG_KLEINSTE,
 ]
+
+DATEITYP_ALLE = "Alle Typen"
+
+# Icon + Anzeigename je unterstützter Dateiendung, für Badges in der
+# Bibliotheksansicht. Unbekannte/künftige Typen fallen auf ein
+# generisches Icon + die Endung in Großbuchstaben zurück (siehe
+# `dateityp_anzeige`).
+DATEITYP_ANZEIGE = {
+    "pdf": {"icon": "📄", "label": "PDF"},
+    "docx": {"icon": "📝", "label": "Word"},
+    "txt": {"icon": "📃", "label": "Text"},
+    "md": {"icon": "📃", "label": "Markdown"},
+    "csv": {"icon": "📊", "label": "CSV"},
+    "xlsx": {"icon": "📊", "label": "Excel"},
+    "pptx": {"icon": "📽️", "label": "PowerPoint"},
+}
+
+
+def dateityp_anzeige(dateityp):
+    """Icon + Anzeigename für einen Dateityp, z. B. "📝 Word"."""
+    eintrag = DATEITYP_ANZEIGE.get(
+        dateityp, {"icon": "📄", "label": (dateityp or "?").upper()}
+    )
+    return f"{eintrag['icon']} {eintrag['label']}"
+
+
+def dateitypen_optionen(dokumente):
+    """Filteroptionen für den Dateityp: 'Alle Typen' + tatsächlich vorhandene Typen."""
+    vorhandene = sorted({dokument.get("dateityp", "pdf") for dokument in dokumente})
+    return [DATEITYP_ALLE] + vorhandene
+
+
+def einheiten_text(dokument):
+    """Formatiert die Einheitenanzahl passend zum Dokumenttyp, z. B. "12 Seiten", "5 Folien"."""
+    anzahl = dokument["seitenzahl"]
+    singular, plural = EINHEIT_WOERTER.get(
+        dokument.get("einheit_typ", "seite"), EINHEIT_WOERTER["seite"]
+    )
+    return f"{anzahl} {singular if anzahl == 1 else plural}"
+
+
+def groesse_text(dokument):
+    """Menschlich lesbare Dateigröße, oder None wenn unbekannt (z. B. Alt-Dokumente)."""
+    groesse = dokument.get("groesse_bytes")
+
+    if not groesse:
+        return None
+    if groesse < 1024:
+        return f"{groesse} B"
+    if groesse < 1024 * 1024:
+        return f"{groesse / 1024:.0f} KB"
+
+    return f"{groesse / (1024 * 1024):.1f} MB"
+
 
 DATUMSFILTER_ALLE = "Alle"
 DATUMSFILTER_HEUTE = "Heute"
@@ -45,34 +105,21 @@ DATUMSFILTER = [
     DATUMSFILTER_BENUTZERDEFINIERT,
 ]
 
-AUSWAHLFILTER_ALLE = "Alle Dokumente"
-AUSWAHLFILTER_AKTIV = "Aktive Dokumente"
-AUSWAHLFILTER_INAKTIV = "Nicht ausgewählte Dokumente"
-
-AUSWAHLFILTER = [AUSWAHLFILTER_ALLE, AUSWAHLFILTER_AKTIV, AUSWAHLFILTER_INAKTIV]
-
-
 def dokumente_filtern(
     dokumente,
     suchbegriff="",
     datumsfilter=DATUMSFILTER_ALLE,
     benutzerdefiniert_von=None,
     benutzerdefiniert_bis=None,
-    aktive_ids=None,
-    auswahlfilter=AUSWAHLFILTER_ALLE,
+    dateityp_filter=DATEITYP_ALLE,
     jetzt=None,
 ):
-    """Filtert Dokumente nach Suchbegriff, Upload-Datum und Auswahlstatus.
+    """Filtert Dokumente nach Suchbegriff, Upload-Datum und Dateityp.
 
     Reine Funktion: verändert weder `dokumente` noch irgendeinen
     Auswahl-/Session-Zustand, sondern gibt nur eine gefilterte Kopie der
     Liste zurück. Der Suchbegriff wird case-insensitiv auf den
     Dateinamen angewendet.
-
-    `aktive_ids` wird nur für den Auswahlfilter benötigt; ist es `None`
-    (z. B. außerhalb des Chat-Bereichs, wo es keine Sidebar-Auswahl
-    gibt), wird der Auswahlfilter ignoriert, selbst wenn `auswahlfilter`
-    gesetzt ist.
     """
     jetzt = jetzt or datetime.now()
     suchbegriff = suchbegriff.strip().lower()
@@ -99,13 +146,11 @@ def dokumente_filtern(
                 if benutzerdefiniert_bis and hochgeladen_am_datum > benutzerdefiniert_bis:
                     continue
 
-        if aktive_ids is not None and auswahlfilter != AUSWAHLFILTER_ALLE:
-            ist_aktiv = dokument["id"] in aktive_ids
-
-            if auswahlfilter == AUSWAHLFILTER_AKTIV and not ist_aktiv:
-                continue
-            if auswahlfilter == AUSWAHLFILTER_INAKTIV and ist_aktiv:
-                continue
+        if (
+            dateityp_filter != DATEITYP_ALLE
+            and dokument.get("dateityp", "pdf") != dateityp_filter
+        ):
+            continue
 
         ergebnis.append(dokument)
 
@@ -126,5 +171,9 @@ def dokumente_sortieren(dokumente, sortierung=SORTIERUNG_NEUESTE):
         return sorted(dokumente, key=lambda d: d["seitenzahl"], reverse=True)
     if sortierung == SORTIERUNG_WENIGSTE_SEITEN:
         return sorted(dokumente, key=lambda d: d["seitenzahl"])
+    if sortierung == SORTIERUNG_GROESSTE:
+        return sorted(dokumente, key=lambda d: d.get("groesse_bytes") or 0, reverse=True)
+    if sortierung == SORTIERUNG_KLEINSTE:
+        return sorted(dokumente, key=lambda d: d.get("groesse_bytes") or 0)
 
     return list(dokumente)

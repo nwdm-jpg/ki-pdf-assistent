@@ -3,9 +3,10 @@
 Wird sowohl von `analyse.py` (Analyse & Vergleich) als auch von
 `pruefung.py` (Dokument prüfen) genutzt, damit Retrieval- und
 Prompt-Aufbau-Logik nicht doppelt existiert. Baut auf `speicher.py`
-(gespeicherte Chunks/Embeddings), `retrieval.py` (semantische Suche) und
-`pdf_logik.py` (OpenAI-Client, Quellenformatierung) auf - hier wird
-nichts davon dupliziert, nur zu einem gemeinsamen Ablauf zusammengesetzt:
+(gespeicherte Chunks/Embeddings), `retrieval.py` (semantische Suche),
+`pdf_logik.py` (OpenAI-Client) und `quellen.py` (formatgerechte
+Quellenangaben) auf - hier wird nichts davon dupliziert, nur zu einem
+gemeinsamen Ablauf zusammengesetzt:
 
 1. `ausschnitte_ermitteln` - lädt gespeicherte Chunks der ausgewählten
    Dokumente und wählt per Embedding-Ähnlichkeit die relevantesten aus
@@ -21,9 +22,8 @@ nichts davon dupliziert, nur zu einem gemeinsamen Ablauf zusammengesetzt:
 """
 
 import speicher
-from pdf_logik import (
-    MODELL,
-    client,
+from pdf_logik import MODELL, client
+from quellen import (
     formatiere_quellenhinweis,
     relevanten_text_zusammenstellen,
     verwendete_quellen,

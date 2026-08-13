@@ -1,9 +1,12 @@
-"""Persistenz für Dokumentbibliothek und Chats (SQLite + lokale PDF-Kopien).
+"""Persistenz für Dokumentbibliothek und Chats (SQLite + lokale Dateikopien).
 
 Alle Daten liegen im projektlokalen Ordner `app_daten/` (nicht Teil des
 Git-Repos): `app_daten/bibliothek.db` für Metadaten, Chunks, Embeddings,
 Chats und Nachrichten; `app_daten/pdfs/` für die Originaldateien
-(benannt nach ihrem Datei-Hash, zur Duplikaterkennung).
+(benannt nach ihrem Datei-Hash + tatsächlicher Endung, zur
+Duplikaterkennung) - der Ordnername ist historisch (aus der PDF-only-
+Zeit) geblieben, enthält inzwischen aber Originaldateien aller
+unterstützten Formate.
 """
 
 import hashlib
@@ -42,8 +45,27 @@ def _verbindung():
         conn.close()
 
 
+def _spalten_ergaenzen(conn, tabelle, spalten):
+    """Fügt fehlender Tabelle fehlende Spalten additiv hinzu (Migration).
+
+    Prüft je Spalte per `PRAGMA table_info`, ob sie bereits existiert,
+    bevor `ALTER TABLE ... ADD COLUMN` ausgeführt wird. Rein additiv und
+    beliebig oft ausführbar - bestehende Datenbanken (inkl. aller
+    vorhandenen Zeilen) bleiben beim Start einer neueren App-Version
+    unangetastet, es werden nur fehlende Spalten mit Default-Werten
+    ergänzt.
+    """
+    vorhandene_spalten = {
+        zeile["name"] for zeile in conn.execute(f"PRAGMA table_info({tabelle})")
+    }
+
+    for spalte, definition in spalten:
+        if spalte not in vorhandene_spalten:
+            conn.execute(f"ALTER TABLE {tabelle} ADD COLUMN {spalte} {definition}")
+
+
 def datenbank_initialisieren():
-    """Legt die benötigten Tabellen an, falls sie noch nicht existieren."""
+    """Legt die benötigten Tabellen an bzw. ergänzt fehlende Spalten."""
     with _verbindung() as conn:
         conn.executescript(
             """
@@ -82,6 +104,29 @@ def datenbank_initialisieren():
             """
         )
 
+        # Additive Migration für Bibliotheken, die vor der Mehrformat-
+        # Unterstützung angelegt wurden: bestehende Dokumente gelten als
+        # PDF ("seite"), bis sie durch die tatsächlich gespeicherten
+        # Werte ersetzt werden (was für Alt-Zeilen nicht nötig ist, da
+        # sie tatsächlich PDFs mit Seiten sind).
+        _spalten_ergaenzen(
+            conn,
+            "dokumente",
+            [
+                ("dateityp", "TEXT NOT NULL DEFAULT 'pdf'"),
+                ("einheit_typ", "TEXT NOT NULL DEFAULT 'seite'"),
+                ("groesse_bytes", "INTEGER"),
+            ],
+        )
+        _spalten_ergaenzen(
+            conn,
+            "chunks",
+            [
+                ("einheit_typ", "TEXT NOT NULL DEFAULT 'seite'"),
+                ("einheit_anzeige", "TEXT"),
+            ],
+        )
+
 
 def _jetzt():
     return datetime.now().isoformat(timespec="seconds")
@@ -103,17 +148,32 @@ def dokument_nach_hash(hash_wert):
         return dict(zeile) if zeile else None
 
 
-def dokument_speichern(dateiname, hash_wert, pdf_bytes, seitenzahl):
-    """Speichert PDF-Datei + Metadaten und gibt die neue Dokument-ID zurück."""
+def dokument_speichern(dateiname, hash_wert, datei_bytes, einheiten_anzahl, dateityp, einheit_typ):
+    """Speichert eine Dokumentdatei + Metadaten und gibt die neue Dokument-ID zurück.
+
+    `einheiten_anzahl`/`einheit_typ` sind formatunabhängig zu verstehen:
+    Seiten bei PDF, Folien bei PPTX, Tabellenblätter bei XLSX,
+    Abschnitte bei DOCX/TXT/MD/CSV (siehe `dokument_verarbeitung.py`).
+    Die Dateigröße wird direkt aus `datei_bytes` ermittelt.
+    """
     with _verbindung() as conn:
         cursor = conn.execute(
-            "INSERT INTO dokumente (dateiname, hash, seitenzahl, hochgeladen_am) "
-            "VALUES (?, ?, ?, ?)",
-            (dateiname, hash_wert, seitenzahl, _jetzt()),
+            "INSERT INTO dokumente "
+            "(dateiname, hash, seitenzahl, hochgeladen_am, dateityp, einheit_typ, groesse_bytes) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                dateiname,
+                hash_wert,
+                einheiten_anzahl,
+                _jetzt(),
+                dateityp,
+                einheit_typ,
+                len(datei_bytes),
+            ),
         )
         dokument_id = cursor.lastrowid
 
-    (PDF_ORDNER / f"{hash_wert}.pdf").write_bytes(pdf_bytes)
+    (PDF_ORDNER / f"{hash_wert}.{dateityp}").write_bytes(datei_bytes)
 
     return dokument_id
 
@@ -122,14 +182,17 @@ def chunks_speichern(dokument_id, chunks, embeddings):
     """Speichert Chunks inkl. Embeddings zu einem Dokument."""
     with _verbindung() as conn:
         conn.executemany(
-            "INSERT INTO chunks (dokument_id, seitennummer, text, embedding) "
-            "VALUES (?, ?, ?, ?)",
+            "INSERT INTO chunks "
+            "(dokument_id, seitennummer, text, embedding, einheit_typ, einheit_anzeige) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
             [
                 (
                     dokument_id,
                     chunk["seitennummer"],
                     chunk["text"],
                     np.asarray(embedding, dtype=np.float32).tobytes(),
+                    chunk.get("einheit_typ", "seite"),
+                    chunk.get("einheit_anzeige"),
                 )
                 for chunk, embedding in zip(chunks, embeddings)
             ],
@@ -155,7 +218,7 @@ def dokument_loeschen(dokument_id):
     """
     with _verbindung() as conn:
         zeile = conn.execute(
-            "SELECT hash FROM dokumente WHERE id = ?", (dokument_id,)
+            "SELECT hash, dateityp FROM dokumente WHERE id = ?", (dokument_id,)
         ).fetchone()
         conn.execute("DELETE FROM dokumente WHERE id = ?", (dokument_id,))
 
@@ -170,7 +233,8 @@ def dokument_loeschen(dokument_id):
                 )
 
     if zeile:
-        (PDF_ORDNER / f"{zeile['hash']}.pdf").unlink(missing_ok=True)
+        dateityp = zeile["dateityp"] or "pdf"
+        (PDF_ORDNER / f"{zeile['hash']}.{dateityp}").unlink(missing_ok=True)
 
 
 def chunks_laden(dokument_ids):
@@ -182,7 +246,8 @@ def chunks_laden(dokument_ids):
 
     with _verbindung() as conn:
         zeilen = conn.execute(
-            f"SELECT c.text, c.seitennummer, c.embedding, d.dateiname "
+            f"SELECT c.text, c.seitennummer, c.embedding, c.einheit_typ, "
+            f"c.einheit_anzeige, d.dateiname "
             f"FROM chunks c JOIN dokumente d ON d.id = c.dokument_id "
             f"WHERE c.dokument_id IN ({platzhalter})",
             dokument_ids,
@@ -193,6 +258,8 @@ def chunks_laden(dokument_ids):
             "dateiname": zeile["dateiname"],
             "seitennummer": zeile["seitennummer"],
             "text": zeile["text"],
+            "einheit_typ": zeile["einheit_typ"],
+            "einheit_anzeige": zeile["einheit_anzeige"],
             "embedding": np.frombuffer(zeile["embedding"], dtype=np.float32),
         }
         for zeile in zeilen
@@ -261,11 +328,16 @@ def chat_laden(chat_id):
 
     chat = dict(chat_zeile)
     chat["dokument_ids"] = dokument_ids
+    # Quellen bleiben in dem Format, in dem sie gespeichert wurden: neue
+    # Nachrichten als Liste von Quellen-Dicts (siehe `quellen.py`), alte
+    # (vor Mehrformat-Unterstützung) als Liste von [dateiname,
+    # seitennummer]-Paaren. `quellen.formatiere_quellenhinweis`
+    # normalisiert beide Formen - hier ist keine Migration nötig.
     chat["nachrichten"] = [
         {
             "frage": zeile["frage"],
             "antwort": zeile["antwort"],
-            "quellen": [tuple(paar) for paar in json.loads(zeile["quellen"])],
+            "quellen": json.loads(zeile["quellen"]),
         }
         for zeile in nachrichten_zeilen
     ]

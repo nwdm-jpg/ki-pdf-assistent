@@ -1,0 +1,7 @@
+streamlit
+openai
+pypdf
+numpy
+python-docx
+openpyxl
+python-pptx
