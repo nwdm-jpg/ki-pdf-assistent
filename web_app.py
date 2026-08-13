@@ -478,6 +478,7 @@ else:
                                 "icon": aktion["icon"],
                                 "dokument_ids": list(ausgewaehlte_ids),
                                 "daten": daten,
+                                "rueckfragen": [],
                             }
                         except Exception as fehler:
                             st.session_state.analyse_ergebnis = None
@@ -497,7 +498,16 @@ else:
         if not ergebnis:
             st.info("Wähle oben Dokumente aus und starte eine Analyse.")
         else:
-            st.markdown(f"### {ergebnis['icon']} {ergebnis['titel']}")
+            kopf_spalte, reset_spalte = st.columns([5, 2])
+            kopf_spalte.markdown(f"### {ergebnis['icon']} {ergebnis['titel']}")
+
+            if reset_spalte.button(
+                "🗑️ Ergebnis leeren",
+                key="analyse_ergebnis_leeren",
+                use_container_width=True,
+            ):
+                st.session_state.analyse_ergebnis = None
+                st.rerun()
 
             ergebnis_namen = ", ".join(
                 namen_je_id.get(i, "(gelöscht)") for i in ergebnis["dokument_ids"]
@@ -512,3 +522,56 @@ else:
 
             if ergebnis["daten"]["quellenhinweis"]:
                 st.caption(ergebnis["daten"]["quellenhinweis"])
+
+            st.divider()
+            st.markdown("#### 💬 Rückfragen zur Analyse")
+            st.caption(
+                "Stelle Rückfragen zu diesem Ergebnis - unabhängig von "
+                "deinen normalen Chats."
+            )
+
+            for eintrag in ergebnis["rueckfragen"]:
+                with st.chat_message("user"):
+                    st.write(eintrag["frage"])
+
+                with st.chat_message("assistant"):
+                    st.write(eintrag["antwort"])
+
+                    if eintrag["quellenhinweis"]:
+                        st.caption(eintrag["quellenhinweis"])
+
+            rueckfrage = st.chat_input("Frage zur Analyse stellen...")
+
+            if rueckfrage:
+                with st.chat_message("user"):
+                    st.write(rueckfrage)
+
+                try:
+                    with st.chat_message("assistant"):
+                        with st.spinner("Antwort wird erstellt..."):
+                            rueckfrage_ergebnis = analyse.rueckfrage_beantworten(
+                                ergebnis["daten"]["text"],
+                                ergebnis["dokument_ids"],
+                                rueckfrage,
+                                verlauf=ergebnis["rueckfragen"],
+                            )
+
+                        st.write(rueckfrage_ergebnis["text"])
+
+                        if rueckfrage_ergebnis["quellenhinweis"]:
+                            st.caption(rueckfrage_ergebnis["quellenhinweis"])
+
+                    ergebnis["rueckfragen"].append(
+                        {
+                            "frage": rueckfrage,
+                            "antwort": rueckfrage_ergebnis["text"],
+                            "quellenhinweis": rueckfrage_ergebnis["quellenhinweis"],
+                        }
+                    )
+                    st.session_state.analyse_ergebnis = ergebnis
+
+                    st.rerun()
+
+                except Exception as fehler:
+                    st.error("Die Rückfrage ist fehlgeschlagen.")
+                    st.caption(f"Technische Details: {fehler}")

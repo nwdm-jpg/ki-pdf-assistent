@@ -51,22 +51,39 @@ _QUELLENFORMAT_HINWEIS = (
     "Daten oder Quellenangaben."
 )
 
+# Gemeinsame Kürze-/Struktur-Vorgabe für alle vier Analysearten, damit
+# die Ergebnisse sich einheitlich lesen (gleiche Überschriften, kompakt
+# statt ausschweifend) und auf einen Blick erfassbar bleiben. Wer mehr
+# Detail möchte, kann in der Rückfragen-Chat nachfragen.
+_KUERZE_HINWEIS = (
+    "Antworte sehr knapp: keine lange Einleitung, keine Wiederholungen, "
+    "keine ausschweifende oder juristisch anmutende Sprache. Nutze kurze "
+    "Stichpunkte und, wo sinnvoll, kompakte Tabellen statt Fließtext. Das "
+    "Ergebnis soll ohne langes Scrollen erfassbar sein - Details kann der "
+    "Nutzer in einer Rückfrage erfragen."
+)
+_STRUKTUR_HINWEIS = (
+    "Gliedere die Antwort so:\n"
+    "## Kernergebnis\n"
+    "1-2 Sätze mit dem wichtigsten Ergebnis.\n\n"
+    "## Wichtigste Punkte\n"
+    "Kompakte Stichpunkte (oder eine Tabelle, wenn übersichtlicher). Nur "
+    "wirklich relevante Punkte, keine Vollständigkeit um jeden Preis."
+)
+
 ZUSAMMENFASSEN_SUCHANFRAGE = (
     "Hauptthema, Zusammenfassung, wichtige Punkte, Bedingungen, Beträge, "
     "Zahlen, Pflichten, Rechte, wichtige Klauseln"
 )
 ZUSAMMENFASSEN_SYSTEM = (
-    "Du fasst Dokumente auf Basis der bereitgestellten Ausschnitte "
-    "strukturiert zusammen. Wenn Ausschnitte aus mehreren Dokumenten "
-    "vorliegen, erstelle für jedes Dokument einen eigenen Abschnitt mit "
-    "dem Dateinamen als Überschrift.\n\n"
-    "Gliedere die Zusammenfassung je Dokument, soweit im Text vorhanden, "
-    "in: Hauptthema, Wichtige Punkte, Wichtige Bedingungen, Wichtige "
-    "Zahlen/Beträge, Pflichten, sowie auffällige Klauseln oder Hinweise. "
-    "Lasse Abschnitte weg, für die die Ausschnitte keine Information "
-    "enthalten.\n\n"
-    f"{_QUELLENFORMAT_HINWEIS} Antworte auf Deutsch in Markdown mit "
-    "Überschriften."
+    "Du fasst Dokumente auf Basis der bereitgestellten Ausschnitte knapp "
+    "zusammen. Wenn Ausschnitte aus mehreren Dokumenten vorliegen, "
+    "erstelle für jedes Dokument einen eigenen Abschnitt (Dateiname als "
+    "Überschrift) mit jeweils Kernergebnis + wichtigsten Punkten "
+    "(Bedingungen, Beträge, Pflichten, auffällige Klauseln - nur was im "
+    "Text belegt und relevant ist).\n\n"
+    f"{_KUERZE_HINWEIS}\n\n{_STRUKTUR_HINWEIS}\n\n"
+    f"{_QUELLENFORMAT_HINWEIS} Antworte auf Deutsch in Markdown."
 )
 
 VERGLEICHEN_SUCHANFRAGE = (
@@ -74,18 +91,21 @@ VERGLEICHEN_SUCHANFRAGE = (
     "Haftung, Datenschutz, Support, Fristen, Verfügbarkeit, Bedingungen"
 )
 VERGLEICHEN_SYSTEM = (
-    "Du vergleichst mehrere Dokumente strukturiert anhand der "
-    "bereitgestellten Ausschnitte.\n\n"
-    "Identifiziere eigenständig sinnvolle Vergleichskategorien anhand des "
-    "tatsächlichen Inhalts der Dokumente (z. B. Laufzeit, "
-    "Kündigungsfrist, Kosten/Preise, Leistungen, Pflichten, Haftung, "
-    "Datenschutz, Support, Fristen, Verfügbarkeit o. ä.). Erzwinge keine "
-    "Kategorie, zu der die Ausschnitte nichts hergeben, und ergänze bei "
-    "Bedarf andere relevante Kategorien.\n\n"
-    "Stelle den Vergleich als Markdown-Tabelle dar (eine Zeile je "
-    "Kategorie, eine Spalte je Dokument). Ergänze danach einen Abschnitt "
-    '"## Wichtigste Unterschiede" mit den bedeutendsten Unterschieden '
-    "zwischen den Dokumenten als Stichpunkte.\n\n"
+    "Du vergleichst mehrere Dokumente knapp anhand der bereitgestellten "
+    "Ausschnitte.\n\n"
+    f"{_KUERZE_HINWEIS}\n\n"
+    "Gliedere die Antwort so:\n"
+    "## Kernergebnis\n"
+    "1-2 Sätze: die wichtigste Erkenntnis des Vergleichs.\n\n"
+    "## Vergleich\n"
+    "Markdown-Tabelle (eine Zeile je Kategorie, eine Spalte je Dokument). "
+    "Identifiziere eigenständig sinnvolle Kategorien anhand des "
+    "tatsächlichen Inhalts (z. B. Laufzeit, Kündigungsfrist, "
+    "Kosten/Preise, Leistungen, Pflichten, Haftung, Datenschutz, "
+    "Support, Fristen, Verfügbarkeit o. ä.) - erzwinge keine Kategorie, "
+    "zu der die Ausschnitte nichts hergeben.\n\n"
+    "## Wichtigste Unterschiede\n"
+    "Nur die bedeutendsten Unterschiede als kurze Stichpunkte.\n\n"
     f"{_QUELLENFORMAT_HINWEIS} Antworte auf Deutsch."
 )
 
@@ -94,15 +114,20 @@ FRISTEN_SUCHANFRAGE = (
     "Zahlungsfrist, Termin, Stichtag, Gültigkeitsdauer"
 )
 FRISTEN_SYSTEM = (
-    "Du extrahierst terminliche und fristbezogene Informationen aus den "
-    "bereitgestellten Dokumentausschnitten: Daten, Fristen, "
+    "Du extrahierst terminliche und fristbezogene Informationen knapp "
+    "aus den bereitgestellten Dokumentausschnitten: Daten, Fristen, "
     "Kündigungsfristen, Vertragslaufzeiten, Verlängerungsfristen, "
     "Zahlungsfristen und andere zeitkritische Verpflichtungen.\n\n"
     "Erfinde keine Daten oder Fristen, die nicht im Text belegt sind. "
     "Wenn ein Dokument keine erkennbaren Fristen enthält, erwähne das "
-    "kurz statt etwas zu erfinden. Liste die gefundenen Punkte klar "
-    "strukturiert und, wo möglich, chronologisch geordnet (frühester "
-    "Termin zuerst) auf, gruppiert nach Dokument.\n\n"
+    "in einem kurzen Halbsatz statt etwas zu erfinden.\n\n"
+    f"{_KUERZE_HINWEIS}\n\n"
+    "Gliedere die Antwort so:\n"
+    "## Kernergebnis\n"
+    "1 Satz: wichtigste bzw. nächste Frist.\n\n"
+    "## Wichtigste Punkte\n"
+    "Kompakte, wo möglich chronologisch geordnete Stichpunkte (frühester "
+    "Termin zuerst) oder eine Tabelle, gruppiert nach Dokument.\n\n"
     f"{_QUELLENFORMAT_HINWEIS} Antworte auf Deutsch in Markdown."
 )
 
@@ -112,15 +137,21 @@ RISIKEN_SUCHANFRAGE = (
     "Gewährleistung"
 )
 RISIKEN_SYSTEM = (
-    "Du analysierst die bereitgestellten Dokumentausschnitte auf "
+    "Du analysierst die bereitgestellten Dokumentausschnitte knapp auf "
     "potenziell wichtige, ungewöhnliche oder nachteilige Klauseln, "
     "Bedingungen, Pflichten, Haftungsregelungen, Einschränkungen oder "
     "Ausschlüsse, die besondere Aufmerksamkeit verdienen.\n\n"
-    "Gruppiere die Punkte nach Dokument. Diese Analyse ist keine "
-    "rechtliche, finanzielle oder professionelle Beratung, sondern "
-    "hebt lediglich potenziell relevante Textstellen hervor - formuliere "
-    "entsprechend vorsichtig (z. B. \"könnte relevant sein\", \"sollte "
-    "geprüft werden\") statt abschließende Bewertungen abzugeben.\n\n"
+    "Diese Analyse ist keine rechtliche, finanzielle oder professionelle "
+    "Beratung, sondern hebt lediglich potenziell relevante Textstellen "
+    "hervor - formuliere entsprechend vorsichtig (z. B. \"könnte "
+    "relevant sein\", \"sollte geprüft werden\") statt abschließende "
+    "Bewertungen abzugeben.\n\n"
+    f"{_KUERZE_HINWEIS}\n\n"
+    "Gliedere die Antwort so:\n"
+    "## Kernergebnis\n"
+    "1 Satz: das auffälligste Risiko.\n\n"
+    "## Wichtigste Punkte\n"
+    "Kompakte Stichpunkte, gruppiert nach Dokument.\n\n"
     f"{_QUELLENFORMAT_HINWEIS} Antworte auf Deutsch in Markdown."
 )
 
@@ -192,3 +223,78 @@ def fristen_ermitteln(dokument_ids):
 def risiken_ermitteln(dokument_ids):
     """Hebt potenziell wichtige/ungewöhnliche Klauseln und Bedingungen hervor."""
     return _analyse_durchfuehren(RISIKEN_SYSTEM, RISIKEN_SUCHANFRAGE, dokument_ids)
+
+
+def rueckfrage_beantworten(analyse_ergebnis_text, dokument_ids, frage, verlauf=None):
+    """Beantwortet eine Rückfrage zu einem bereits erstellten Analyseergebnis.
+
+    Getrennt von `pdf_logik.frage_beantworten` (normaler Chat), damit der
+    Rückfragen-Verlauf innerhalb der Analyse-Arbeitsfläche eigenständig
+    bleibt und nicht mit normalen Chat-Konversationen vermischt wird.
+
+    Nutzt wie der normale Chat semantische Suche über die Chunks der
+    Analyse-Dokumente (Grundlage für Faktentreue + Quellen), zusätzlich
+    aber das bisherige Analyseergebnis als Kontext, damit sich Fragen wie
+    "Welche dieser Fristen ist am wichtigsten?" auf das Ergebnis beziehen
+    können statt nur auf den rohen Dokumenttext.
+
+    `verlauf` ist optional eine Liste bisheriger Rückfragen
+    ({"frage", "antwort"}) dieser Analyse-Sitzung.
+    """
+    if not dokument_ids:
+        raise ValueError("Es sind keine Dokumente für diese Analyse ausgewählt.")
+
+    verlauf = verlauf or []
+
+    zusatzkontext = "\n".join(
+        f"{eintrag['frage']} {eintrag['antwort']}" for eintrag in verlauf[-2:]
+    )
+
+    anzahl_dokumente = len(dokument_ids)
+    anzahl_pro_dokument = 4 if anzahl_dokumente == 1 else max(2, 8 // anzahl_dokumente)
+
+    chunks = speicher.chunks_laden(dokument_ids)
+    ausschnitte = relevante_chunks_ermitteln(
+        frage,
+        chunks,
+        anzahl_pro_dokument=anzahl_pro_dokument,
+        zusatzkontext=zusatzkontext,
+    )
+    relevanter_text = (
+        relevanten_text_zusammenstellen(ausschnitte)
+        if ausschnitte
+        else "(keine passenden Ausschnitte gefunden)"
+    )
+
+    system_text = (
+        "Du beantwortest Rückfragen zu einer bereits erstellten "
+        "Dokumentanalyse. Nutze das folgende Analyseergebnis als Kontext "
+        "und die bereitgestellten Dokumentausschnitte als "
+        f"Faktengrundlage.\n\nAnalyseergebnis:\n{analyse_ergebnis_text}\n\n"
+        f"{_KUERZE_HINWEIS} Nutze den bisherigen Rückfrage-Verlauf nur, "
+        "um Bezüge einzuordnen, nicht als zusätzliche Wissensquelle. "
+        f"{_QUELLENFORMAT_HINWEIS} Antworte auf Deutsch."
+    )
+
+    nachrichten = [{"role": "system", "content": system_text}]
+
+    for eintrag in verlauf[-6:]:
+        nachrichten.append({"role": "user", "content": eintrag["frage"]})
+        nachrichten.append({"role": "assistant", "content": eintrag["antwort"]})
+
+    nachrichten.append(
+        {
+            "role": "user",
+            "content": f"Dokumentausschnitte:\n{relevanter_text}\n\nRückfrage: {frage}",
+        }
+    )
+
+    antwort = client.responses.create(model=MODELL, input=nachrichten)
+
+    quellen = verwendete_quellen(ausschnitte)
+
+    return {
+        "text": antwort.output_text,
+        "quellen": quellen,
+        "quellenhinweis": formatiere_quellenhinweis(quellen),
+    }
