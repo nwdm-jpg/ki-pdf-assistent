@@ -4,20 +4,23 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project overview
 
-KI-PDF-Assistent is a German-language, AI-powered PDF question-answering tool. A user uploads/selects a PDF, asks a question, and the app finds the most relevant pages (simple keyword overlap, no embeddings) and sends only those pages to an OpenAI model to generate a grounded answer. There is no backend framework, database, or test suite — this is a small, single-purpose personal project.
+KI-PDF-Assistent is a German-language, AI-powered document question-answering and analysis tool. The primary app (`web_app.py`) is a Streamlit workspace: users build a persistent, multi-format **document library**, then use it across three AI features — a multi-chat **assistant**, one-off **Analyse & Vergleich** (summarize/compare/deadlines/risks), and a category-based **Dokument prüfen** (document check). Retrieval is semantic (OpenAI embeddings + cosine similarity, with a small keyword bonus), not plain keyword overlap. A separate, much simpler CLI (`app.py`) still exists for a single PDF and has not been migrated to any of this — it keeps its original keyword-overlap retrieval and single-question, no-history behavior. There is no backend framework, no external database, and no automated test suite — this is a small, personal project.
 
 ## Commands
 
-There is no `requirements.txt`/`pyproject.toml` in the repo; dependencies exist only in the local `.venv`. Known dependencies (from `.venv`): `openai`, `pypdf`, `streamlit`.
+`requirements.txt` lists runtime dependencies (`streamlit`, `openai`, `pypdf`, `numpy`, `python-docx`, `openpyxl`, `python-pptx`); there is no `pyproject.toml`. Install into the existing `.venv`.
 
 ```bash
 # Activate the existing venv (Windows)
 .venv\Scripts\activate
 
-# Run the Streamlit web app (primary entry point)
+# Install dependencies
+pip install -r requirements.txt
+
+# Run the Streamlit web app (primary entry point: library, chats, analysis, document check)
 streamlit run web_app.py
 
-# Run the CLI version (reads a PDF from the pdfs/ folder, prompts interactively)
+# Run the legacy CLI version (single PDF from pdfs/, keyword retrieval, no history)
 python app.py
 
 # Sanity-check the OpenAI API connection/credentials
@@ -30,36 +33,110 @@ There are no lint, format, or test commands configured in this repo.
 
 ## Architecture
 
-`app.py` and `web_app.py` are entry points that share their PDF/retrieval/OpenAI logic via `pdf_logik.py`; UI-specific orchestration (print statements, Streamlit widgets, spinners, try/except boundaries) stays in each entry point:
+### Module/file structure
 
-- **`web_app.py`** — Streamlit UI (main entry point). Multi-document, conversational chat assistant: upload any number of PDFs at once (sidebar), ask questions that search across all of them, and get answers grounded in the retrieved excerpts with filename+page sources. Chat history lives in `st.session_state.chat_verlauf`; uploaded documents (each already extracted into page-level entries) live in `st.session_state.dokumente`, keyed by `(dateiname, size)` so re-running the script doesn't re-parse unchanged files and removing a file from the uploader drops it from state.
-- **`app.py`** — CLI equivalent for a *single* PDF: loads a file by filename from `pdfs/`, loops on stdin questions until the user types `ende`. No multi-document or conversational-history features — each question is answered independently, matching its original behavior.
-- **`pdf_logik.py`** — shared module: PDF text extraction, keyword-based multi-document page retrieval, source formatting, and the OpenAI call (with optional chat-history threading). Holds the module-level `client = OpenAI()` (env-based key handling), `STOPPWOERTER`, and `MODELL`.
+- **`web_app.py`** — Streamlit UI, the main entry point. Five areas selected via `st.session_state.aktiver_bereich` (a plain session variable, not a widget-bound key, so both the sidebar nav and the start-page cards can set it): Startseite (home), 💬 Chat, 🔍 Analyse & Vergleich, 🛡️ Dokument prüfen, 📚 Dokumentenbibliothek. Owns the single upload/processing path (`dateien_verarbeiten`) and all Streamlit widget/spinner/error-boundary orchestration.
+- **`app.py`** — legacy CLI for a *single* PDF: loads a file by filename from `pdfs/`, loops on stdin questions until `ende`. Independent, unmigrated code path — no multi-document, no library, no semantic search, no chat history.
+- **`pdf_logik.py`** — owns the module-level OpenAI `client` and `MODELL` (`"gpt-5-mini"`, `client.responses.create`, Responses API) that every other module imports rather than creating its own client. Otherwise holds only the legacy, PDF-only, keyword-overlap pipeline used exclusively by `app.py` (`pdf_seiten_extrahieren`, `relevante_seiten_ermitteln`, `relevanten_text_zusammenstellen`, `verwendete_quellen`, `formatiere_quellenhinweis`, `frage_beantworten`). `web_app.py` imports only `frage_beantworten` from here for the Chat area's final answer call; everything else in the multi-document path uses `quellen.py` / `retrieval.py` / `ki_analyse.py` instead of this module's equivalents.
+- **`dokument_verarbeitung.py`** — format-detecting document parser. Supports PDF, DOCX, TXT, MD, CSV, XLSX, PPTX (`SUPPORTED_EXTENSIONS`, `PARSER_JE_ENDUNG`). Each format has a small `_..._einheiten` parser that splits a file into "Einheiten" (page/slide/sheet/section — one logical unit each); all parsers feed into the shared `text_in_chunks_aufteilen` (sentence-aware, ~1000 chars, 150-char overlap). Adding a new format means writing one parser function and a `PARSER_JE_ENDUNG` entry — the rest of the pipeline (chunking, storage, retrieval, source formatting) is unchanged. Unsupported extensions raise `NichtUnterstuetzterDateityp` with a clear German message instead of crashing.
+- **`retrieval.py`** — semantic search over stored chunks using OpenAI embeddings (`text-embedding-3-small`). Score = cosine similarity (primary) + a small (0.15) keyword-overlap bonus, so exact term matches aren't lost to pure embedding similarity. Selects the top N chunks **per document**, never a single global top-N — this guarantees every active document stays visible to the model even when chat-history context (`zusatzkontext`) biases the query toward one document. `embeddings_batch_erstellen` embeds a whole document's chunks in one API call.
+- **`speicher.py`** — SQLite + local file persistence, all under project-local `app_daten/` (gitignored). See "Persistent storage" below.
+- **`quellen.py`** — the one source-formatting/prompt-text-assembly implementation for the multi-format path (Chat, Analyse & Vergleich, Dokument prüfen): `relevanten_text_zusammenstellen`, `verwendete_quellen`, `formatiere_quellenhinweis`. Format-aware (Seite/Folie/Tabellenblatt/Abschnitt via `EINHEIT_WOERTER`) and backward-compatible with legacy 2-tuple `(dateiname, seitennummer)` sources stored in old chat messages, so no data migration was needed when this replaced the equivalent functions in `pdf_logik.py` for everything except `app.py`.
+- **`ki_analyse.py`** — shared retrieval/prompt/API plumbing used by both `analyse.py` and `pruefung.py`, so that logic isn't duplicated between the two features: `ausschnitte_ermitteln` (load a document selection's chunks, semantic-select the best), `ki_anfrage` (assemble system/history/content messages, call the Responses API, return `{text, quellen, quellenhinweis}`), `rueckfrage_beantworten` (generic follow-up-question handler for an already-produced result, parameterized by `kontext_label` so callers keep independent follow-up threads). Also defines the shared `KUERZE_HINWEIS` (terseness instruction) and `QUELLENFORMAT_HINWEIS` (in-text citation format instruction) used by every AI-analysis system prompt.
+- **`analyse.py`** — Analyse & Vergleich feature: `zusammenfassen`, `vergleichen`, `fristen_ermitteln`, `risiken_ermitteln`. Each is a fixed topical search query (there's no user question to search on) + a dedicated system prompt, built on `ki_analyse.py`. `rueckfrage_beantworten` wraps `ki_analyse.rueckfrage_beantworten` with `kontext_label="Analyseergebnis"`.
+- **`pruefung.py`** — Dokument prüfen feature: data-driven `KATEGORIEN` (risiken, kosten, fristen, pflichten_eigene, pflichten_gegenseite, unklare_regelungen — each icon/title/focus/search-query) and `PRESETS` (allgemein/vertrag/angebot/rechnung — a title + extra focus clause). Adding a category or preset is a new dict entry only. `einzelpruefung` runs one category; `kompletter_check` runs all categories through **one** combined search query + **one** model call (see cost-awareness below). Priority markers 🔴/🟡/🟢 are enforced via `_PRIORITAETS_ANWEISUNG`. `rueckfrage_beantworten` wraps `ki_analyse.rueckfrage_beantworten` with `kontext_label="Prüfungsergebnis"`.
+- **`dokumentbibliothek.py`** — pure, Streamlit-independent filter/sort/display helpers for the library view (`dokumente_filtern`, `dokumente_sortieren`, `dateityp_anzeige`, `einheiten_text`, `groesse_text`, date-range constants). Never mutates the documents passed in or any selection/session state — search/sort/filter are purely presentational.
+- **`komponenten.py`** — shared Streamlit UI building blocks reused across areas: `nav_eintrag`/`start_karte`/`modus_karte` (navigation and action cards), `dokument_mehrfachauswahl` (multi-select with session-state persistence that survives a run where the widget isn't drawn), `ergebnis_kopf` + `rueckfragen_chat` (result header and generic follow-up chat UI shared by Analyse & Vergleich and Dokument prüfen), `quellen_hinweis`, `seiten_kopf`, `leerer_zustand`. Colors/radii/fonts come from the native Streamlit theme (`.streamlit/config.toml`), not from CSS — `css_einbinden` only injects the few structural tweaks the theme can't express (card min-height, etc.).
 - **`api_test.py`** — minimal standalone script to verify the OpenAI API key/connection works.
 
-### Data model: Seiteneintrag
+### Data model
 
-A **Seiteneintrag** is a dict `{"dateiname": str, "seitennummer": int, "text": str}` — one page of one document. Multi-document search is just a flat list of Seiteneintrag dicts pooled from every uploaded file (see `web_app.py`'s `alle_seiten`); the single-document CLI case is simply a pool containing one document's pages.
+Two related but distinct entry shapes exist side by side:
 
-### Question-answering pipeline (`pdf_logik.py`)
+- **Legacy Seiteneintrag** (`pdf_logik.py`, used only by `app.py`): `{"dateiname": str, "seitennummer": int, "text": str}` — one page of one PDF.
+- **Chunk** (`dokument_verarbeitung.py` onward, used everywhere else): `{"dateiname": str, "seitennummer": int, "einheit_typ": str, "einheit_anzeige": str, "text": str}`, plus `"embedding"` once loaded from/written to storage. `einheit_typ` is one of `seite`/`folie`/`tabellenblatt`/`abschnitt` (see `quellen.EINHEIT_WOERTER`); `einheit_anzeige` is the human-facing label (e.g. a sheet name). `quellen.py` also transparently accepts legacy 2-tuple `(dateiname, seitennummer)` sources, so old stored chat messages keep rendering correctly.
 
-1. `pdf_seiten_extrahieren(reader, dateiname)` — extract text per page from an already-opened `pypdf.PdfReader` → list of Seiteneintrag dicts for that one document (pages with no extractable text are skipped).
-2. `relevante_seiten_ermitteln(frage, seiten, anzahl=3, zusatzkontext="")` — tokenize the question (+ optional `zusatzkontext`), strip German stopwords (`STOPPWOERTER`), and score every page by the size of the intersection between question words and page words (simple bag-of-words overlap — no embeddings/vector search). **Scores and selects the top `anzahl` pages per document, not a single global top-N** — this guarantees every uploaded document gets a chance to appear in the context, even if a prior chat turn's vocabulary biases scoring toward one document (see the follow-up scenario below). `web_app.py` passes the recent chat history as `zusatzkontext` so vocabulary-poor follow-ups still retrieve something relevant, and scales `anzahl` down as the document count grows to keep the prompt bounded.
-3. `relevanten_text_zusammenstellen(beste_seiten)` — builds the prompt text, with each excerpt labeled `--- {dateiname}, Seite {n} ---`.
-4. `verwendete_quellen(beste_seiten)` — extracts `(dateiname, seitennummer)` pairs from the selected pages.
-5. `frage_beantworten(frage, relevanter_text, verlauf=None)` — calls `client.responses.create(model=MODELL, ...)` (OpenAI Responses API, not Chat Completions) with a system prompt instructing the model to answer *only* from the provided pages. When `verlauf` (a list of `{"frage", "antwort"}` dicts from the current chat) is given, prior turns are threaded in as alternating user/assistant messages and the system prompt gains an extra clause: use the history only to resolve references ("im zweiten Vertrag"), never as an additional knowledge source. `app.py` never passes `verlauf`, so its system prompt and behavior are unchanged from the single-document version.
-6. `formatiere_quellenhinweis(quellen)` — formats `(dateiname, seitennummer)` pairs (from `verwendete_quellen`) into a German source string for display: groups by filename, dedups and sorts page numbers, and picks singular ("Seite 3") vs. plural ("Seiten 3, 7") wording per file, e.g. `"Quellen: vertrag_a.pdf (Seite 1); vertrag_b.pdf (Seiten 3, 7)"`. Returns `""` for no sources. Used by `web_app.py` below each chat answer; `app.py` derives its own plain page-number list from `verwendete_quellen` for its console output and does not use this formatter.
+### Persistent storage
 
-Conversational follow-ups: `web_app.py` passes the last 2 turns' text as `zusatzkontext` to retrieval and the last 6 turns as `verlauf` to `frage_beantworten`, both scoped to `st.session_state.chat_verlauf` (cleared by the "Chat leeren" button, never persisted beyond the session).
+Everything lives under project-local `app_daten/` (gitignored — never committed):
+
+- `app_daten/bibliothek.db` — SQLite, four tables: `dokumente` (id, dateiname, hash UNIQUE, seitenzahl, hochgeladen_am, dateityp, einheit_typ, groesse_bytes), `chunks` (id, dokument_id FK CASCADE, seitennummer, text, embedding BLOB, einheit_typ, einheit_anzeige), `chats` (id, titel, erstellt_am, aktualisiert_am, dokument_ids JSON list), `nachrichten` (id, chat_id FK CASCADE, frage, antwort, quellen JSON, erstellt_am).
+- `app_daten/pdfs/` — original uploaded file bytes, named `<sha256-hash>.<extension>` (the folder name is historical from the PDF-only era but now holds every supported format). The hash also drives upload dedup (`speicher.dokument_nach_hash`) — re-uploading identical bytes is a no-op.
+- Schema changes are additive-only: `speicher._spalten_ergaenzen` checks `PRAGMA table_info` and runs `ALTER TABLE ... ADD COLUMN` for anything missing, on every startup. There is no migration framework and no destructive schema change should be introduced without discussing it first — existing rows/databases must keep working.
+- Deleting a document (`speicher.dokument_loeschen`) cascades chunk deletion via FK and also actively strips that document's id from every chat's `dokument_ids`, plus deletes its file copy.
+- The project-root `pdfs/` folder is unrelated to any of this — it's `app.py`'s original CLI-only sample folder.
+
+### Multi-format document support
+
+`dokument_verarbeitung.py` supports PDF, DOCX, TXT, MD, CSV, XLSX, PPTX. Each format parses into "Einheiten" — pages (PDF), slides (PPTX), sheets (XLSX, capped at 500 rows/sheet), or size-targeted paragraph sections (~1500 chars — DOCX/TXT/MD via `_absaetze_zu_abschnitten`, CSV in 50-row blocks) — which then all go through the same `text_in_chunks_aufteilen`. This is the only chunking implementation in the app.
+
+### Document library workspace
+
+📚 Dokumentenbibliothek is the single place documents are uploaded and processed (`web_app.py`'s `dateien_verarbeiten`); Chat, Analyse & Vergleich, and Dokument prüfen all read from this shared library rather than re-uploading. The library view adds search, file-type filter, upload-date filter, and eight sort orders, all via the pure functions in `dokumentbibliothek.py` — filtering/sorting never touches selection state in any of the three feature areas.
+
+### Semantic retrieval
+
+`retrieval.py` (embeddings + cosine similarity + keyword bonus, per-document top-N) is used everywhere in the multi-document path — Chat, Analyse & Vergleich (via `ki_analyse.ausschnitte_ermitteln`), Dokument prüfen (same). It supersedes, but does not remove, the plain keyword-overlap retrieval in `pdf_logik.py`, which remains exclusively `app.py`'s (unmigrated) retrieval method.
+
+### Generic source formatting
+
+`quellen.py` is format-aware: it renders `"Seite 3"`, `"Folie 7"`, `"Tabellenblatt \"Kosten\""`, `"Abschnitt 2"` etc. depending on `einheit_typ`, groups by filename (and by unit-type within a filename if a document mixes types), sorts numeric display values ascending and non-numeric ones alphabetically-quoted, and dedups. It replaces `pdf_logik.formatiere_quellenhinweis`/`verwendete_quellen`/`relevanten_text_zusammenstellen` for every caller except `app.py`.
+
+### Multiple chats
+
+`speicher.py`'s `chats`/`nachrichten` tables back a full multi-chat sidebar: create (`chat_erstellen`), list (`chat_liste`, most-recently-updated first), switch, delete (`chat_loeschen`, with fallback to a fresh chat if the active one is deleted). A chat's title is auto-derived from its first question via a plain string heuristic (`_kurztitel_erzeugen`, ≤45 chars) — deliberately *not* a model call, to avoid spending API cost on titling.
+
+### Per-chat document selections
+
+`chats.dokument_ids` (JSON) holds each chat's own active-document set, independent of the Analyse & Vergleich and Dokument prüfen selections. The sidebar's multiselect (visible only while the Chat area is active) uses a per-chat session-state key (`chat_dokument_ids_{chat_id}`) via `komponenten.dokument_mehrfachauswahl`, so switching chats mid-session never bleeds one chat's selection into another's. Only a chat's active documents feed its retrieval and answers; deleted documents are silently dropped from `dokument_ids` on load (`speicher._existierende_dokument_ids`).
+
+### Analyse & Vergleich (`analyse.py`, `web_app.py` BEREICH_ANALYSE)
+
+Four fixed actions over an independently-selected multi-document set (own `session_key`, unrelated to Chat's or Dokument prüfen's): Zusammenfassen (≥1 doc), Dokumente vergleichen (≥2 docs), Fristen & Termine, Risiken & Auffälligkeiten. Each runs a fixed topical search query (no user question exists to search on) through `ki_analyse`, then renders the structured result plus a dedicated follow-up (`rueckfragen`) chat thread held in `st.session_state.analyse_ergebnis`.
+
+### Dokument prüfen (`pruefung.py`, `web_app.py` BEREICH_PRUEFUNG)
+
+Six categories × four presets, both fully data-driven (`KATEGORIEN`, `PRESETS`) so new ones need no UI or control-flow changes. A user can run one category (`einzelpruefung`) or the full check (`kompletter_check` — all categories, one combined query, one model call). Each result gets a priority-annotated (🔴/🟡/🟢) breakdown and its own follow-up chat thread, independent of Analyse & Vergleich's and Chat's, and its own document selection.
+
+### Shared analysis/retrieval helpers (`ki_analyse.py`)
+
+The retrieval → prompt-assembly → Responses-API-call → source-formatting pipeline used by both `analyse.py` and `pruefung.py` lives here exactly once, along with the two shared system-prompt fragments (`KUERZE_HINWEIS`, `QUELLENFORMAT_HINWEIS`) that keep every AI-analysis feature's output equally terse and equally well-sourced. New AI-analysis features (beyond Analyse & Vergleich / Dokument prüfen) should be built on this module rather than re-implementing retrieval or prompt assembly.
 
 ### Language convention
 
-All UI strings, variable/function names, and prompts are in German (e.g. `frage` = question, `antwort` = answer, `seiten` = pages, `dokumente` = documents). Keep new code consistent with this convention.
+All UI strings, variable/function names, and prompts are in German (e.g. `frage` = question, `antwort` = answer, `seiten` = pages, `dokumente` = documents, `bewertete_seiten` = scored pages). Keep new code consistent with this convention.
 
 ## Files
 
-- `pdfs/` — local folder used by `app.py` as the source for PDFs by filename; contains a sample test PDF.
+- `pdfs/` — local folder used only by the legacy `app.py` CLI as the source for PDFs by filename; contains sample test PDFs. Not related to the document library.
+- `app_daten/` — gitignored runtime data: the SQLite library/chat database and original uploaded files. Created on first run (`speicher.datenbank_initialisieren`); never commit its contents.
+- `.streamlit/config.toml` — Streamlit theme (colors/fonts); `komponenten.py`'s CSS only adds structural layout the theme can't express.
 
+## Testing approach
+
+There is no automated test suite (no pytest or similar configured) and no lint/format tooling. Verification is manual:
+
+- For any UI/feature change, run `streamlit run web_app.py` and exercise the actual feature in-browser — golden path and at least one edge case (e.g. no documents, one document, several documents, deleting an active document mid-chat).
+- `python api_test.py` sanity-checks OpenAI connectivity/credentials in isolation.
+- Several modules are deliberately kept pure and Streamlit-independent specifically so they're easy to test in isolation later even though no tests exist yet: `dokumentbibliothek.py` (filter/sort), `quellen.py` (source formatting), `dokument_verarbeitung.py`'s `text_in_chunks_aufteilen` (chunking). When adding non-trivial logic, prefer putting it in a pure module like these over embedding it directly in `web_app.py`'s widget code, for the same reason.
+
+## API cost-awareness rules
+
+The codebase has several deliberate patterns to keep OpenAI usage cheap; preserve them when extending the app:
+
+- **Batch embeddings, never loop per-chunk.** A newly uploaded document's chunks are embedded in one call (`retrieval.embeddings_batch_erstellen`), not one call per chunk.
+- **Cap chunks per document, and scale the cap down as document count grows.** Chat uses 4 chunks/doc for a single active document, else `max(2, 8 // anzahl_dokumente)`; Analyse & Vergleich uses 8/doc; a single Dokument-prüfen category uses 6/doc; `kompletter_check` uses 12/doc but folds all categories into one call (see below) rather than multiplying calls.
+- **Prefer one combined model call over N smaller ones.** `pruefung.kompletter_check` runs all six categories through a single combined search query and a single Responses API call instead of six independent (6x cost) calls — follow this pattern for any new "run everything" action.
+- **Keep answers terse by instruction, not just for readability.** `ki_analyse.KUERZE_HINWEIS` (bullets/tables over prose, no filler) caps output tokens on every AI-analysis feature; `pdf_logik.frage_beantworten`'s system prompt follows the same idea for Chat.
+- **Never spend a model call on something a heuristic can do.** Chat titles are derived with a plain string function (`speicher._kurztitel_erzeugen`), not an API call.
+- **Dedup uploads by content hash before parsing/embedding** (`speicher.dokument_nach_hash`) so re-uploading an unchanged file never re-spends embedding cost.
+- When adding a new AI-analysis feature, build it on `ki_analyse.py` (fixed/topical search query + capped per-document chunk count + one model call) rather than inventing a new retrieval/prompt/API pattern.
+
+## Git workflow
+
+- Commit messages are short, English, imperative-mood summaries of the change (e.g. "Add multi-format document support and library workspace") — this is the current convention; do not revert to the earlier German-language commit style still visible further back in history.
+- `app_daten/` (the SQLite database and original uploaded files) is gitignored and must never be committed.
+- Follow the repo-wide instruction below: never commit or push automatically unless explicitly asked.
 
 ## Development workflow
 
