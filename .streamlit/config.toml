@@ -1,13 +1,26 @@
-# Design-System der KI-PDF-Assistent-App: Dunkles Theme mit einer
-# einheitlichen Akzentfarbe sowie konsistenten Radien/Rahmen für alle
-# Karten, Buttons und Eingabefelder. Bewusst über Streamlits natives
-# Theming statt über CSS-Overrides gelöst (siehe auch komponenten.py für
-# die wenigen strukturellen CSS-Ergänzungen, die config.toml nicht
-# abdecken kann, z. B. die Mindesthöhe der Startseiten-Karten).
+# Design-System der AVENLOQ-App: helle, klare Arbeitsflaeche (Content)
+# kombiniert mit einer dunklen Navy-Sidebar (Navigation) - die
+# Markenpalette (Dark Navy, Blue -> Violet) wird ueber Streamlits native
+# Theming-Optionen gesetzt, nicht per CSS-Override. Der Blue -> Violet
+# Farbverlauf fuer Primaerbuttons/aktive Navigation kommt aus der
+# zentralen CSS-Ergaenzung in komponenten.py (dort auch die wenigen
+# strukturellen Ergaenzungen, die config.toml nicht abdecken kann).
 [theme]
-base = "dark"
-primaryColor = "#6366F1"
+base = "light"
+primaryColor = "#2563EB"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F6F4FE"
+textColor = "#0D1026"
+linkColor = "#7C3AED"
+font = "sans-serif"
 baseRadius = "large"
 buttonRadius = "large"
 showWidgetBorder = true
 showSidebarBorder = true
+
+[theme.sidebar]
+backgroundColor = "#0D1026"
+secondaryBackgroundColor = "#171B3D"
+textColor = "#EDE9FE"
+primaryColor = "#7C3AED"
+borderColor = "#262B52"

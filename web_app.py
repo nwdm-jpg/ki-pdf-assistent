@@ -25,8 +25,8 @@ BEREICH_BIBLIOTHEK = "📚 Dokumentenbibliothek"
 
 
 st.set_page_config(
-    page_title="KI-PDF-Assistent",
-    page_icon="📄",
+    page_title="AVENLOQ",
+    page_icon="🟣",
     layout="wide",
 )
 
@@ -129,7 +129,7 @@ def _pruefung_starten(modus, icon, titel, funktion, dokument_ids):
 
 
 with st.sidebar:
-    st.markdown("## 📄 KI-PDF-Assistent")
+    komponenten.marke_kopf()
 
     bereich = st.session_state.aktiver_bereich
 
@@ -223,16 +223,29 @@ with st.sidebar:
 
 
 if bereich == BEREICH_START:
-    st.title("Willkommen")
-    st.caption("Was möchtest du mit deinen Dokumenten machen?")
+    komponenten.marke_kopf(gross=True)
+    komponenten.marke_tagline()
+    st.caption(
+        "Nutze KI, um deine Dokumente schneller zu verstehen, zu analysieren "
+        "und wichtige Informationen zu finden."
+    )
 
-    spalte_chat, spalte_analyse, spalte_pruefung = st.columns(3)
+    alle_dokumente_start = speicher.dokumente_laden()
+    alle_chats_start = speicher.chat_liste()
+
+    spalte_stat_dokumente, spalte_stat_chats = st.columns(2)
+    spalte_stat_dokumente.metric("Dokumente", len(alle_dokumente_start))
+    spalte_stat_chats.metric("Chats", len(alle_chats_start))
+
+    st.divider()
+
+    spalte_chat, spalte_analyse, spalte_pruefung, spalte_bibliothek = st.columns(4)
 
     with spalte_chat:
         if komponenten.start_karte(
             "💬",
-            "Mit Dokumenten chatten",
-            "Stelle Fragen und erhalte Antworten direkt aus deinen Dokumenten.",
+            "Chat",
+            "Stelle Fragen zu deinen Dokumenten.",
             "Chat starten",
             key="chat",
         ):
@@ -243,7 +256,7 @@ if bereich == BEREICH_START:
         if komponenten.start_karte(
             "🔍",
             "Analyse & Vergleich",
-            "Fasse Dokumente zusammen, vergleiche Inhalte und finde wichtige Fristen.",
+            "Fasse Inhalte zusammen und vergleiche Dokumente.",
             "Analyse starten",
             key="analyse",
         ):
@@ -254,16 +267,25 @@ if bereich == BEREICH_START:
         if komponenten.start_karte(
             "🛡️",
             "Dokument prüfen",
-            "Lass wichtige Stellen, Risiken, Pflichten und Auffälligkeiten automatisch prüfen.",
+            "Erkenne wichtige Punkte, Fristen und mögliche Risiken.",
             "Dokument prüfen",
             key="pruefung",
         ):
             st.session_state.aktiver_bereich = BEREICH_PRUEFUNG
             st.rerun()
 
-    st.divider()
+    with spalte_bibliothek:
+        if komponenten.start_karte(
+            "📚",
+            "Dokumentenbibliothek",
+            "Verwalte und durchsuche deine Dokumente.",
+            "Zur Bibliothek",
+            key="bibliothek",
+        ):
+            st.session_state.aktiver_bereich = BEREICH_BIBLIOTHEK
+            st.rerun()
 
-    alle_dokumente_start = speicher.dokumente_laden()
+    st.divider()
 
     if alle_dokumente_start:
         wort = "Dokument" if len(alle_dokumente_start) == 1 else "Dokumente"
@@ -279,16 +301,6 @@ if bereich == BEREICH_START:
                     st.caption(dokumentbibliothek.einheiten_text(dokument))
     else:
         komponenten.leerer_zustand("Füge zuerst ein Dokument zu deiner Dokumentenbibliothek hinzu.")
-
-    if komponenten.modus_karte(
-        "📤",
-        "Dokument hinzufügen",
-        "Lade neue Dokumente hoch oder verwalte deine bestehende Bibliothek.",
-        "Zur Bibliothek",
-        key="home_bibliothek",
-    ):
-        st.session_state.aktiver_bereich = BEREICH_BIBLIOTHEK
-        st.rerun()
 
 
 elif bereich == BEREICH_CHAT:
@@ -308,6 +320,9 @@ elif bereich == BEREICH_CHAT:
         aktive_namen = ", ".join(dokument["dateiname"] for dokument in aktive_dokumente)
         st.caption(f"Aktive Dokumente: {aktive_namen}")
 
+        if not aktueller_chat["nachrichten"]:
+            komponenten.leerer_zustand("Stelle eine Frage zu deinen Dokumenten.")
+
         for nachricht in aktueller_chat["nachrichten"]:
             with st.chat_message("user"):
                 st.write(nachricht["frage"])
@@ -316,7 +331,7 @@ elif bereich == BEREICH_CHAT:
                 st.write(nachricht["antwort"])
                 komponenten.quellen_hinweis(formatiere_quellenhinweis(nachricht["quellen"]))
 
-        frage = st.chat_input("Stelle eine Frage zu deinen Dokumenten...")
+        frage = st.chat_input("Frage zu deinen Dokumenten …")
 
         if frage:
             with st.chat_message("user"):
@@ -503,7 +518,7 @@ elif bereich == BEREICH_ANALYSE:
                 st.rerun()
 
             if ergebnis["modus"] == "risiken":
-                st.warning(analyse.RISIKEN_HINWEIS)
+                komponenten.hinweis_dezent(analyse.RISIKEN_HINWEIS)
 
             with st.container(border=True):
                 st.markdown(ergebnis["daten"]["text"])
@@ -625,7 +640,7 @@ elif bereich == BEREICH_PRUEFUNG:
                 st.session_state.pruefung_ergebnis = None
                 st.rerun()
 
-            st.warning(pruefung.PRUEFUNG_HINWEIS)
+            komponenten.hinweis_dezent(pruefung.PRUEFUNG_HINWEIS)
             st.caption(pruefung.PRIORITAETS_LEGENDE)
 
             with st.container(border=True):
@@ -647,7 +662,7 @@ elif bereich == BEREICH_PRUEFUNG:
 else:  # BEREICH_BIBLIOTHEK
     komponenten.seiten_kopf(
         BEREICH_BIBLIOTHEK,
-        "Lade neue Dokumente hoch und verwalte deine bestehende Bibliothek.",
+        "Alle deine Dokumente an einem Ort.",
     )
 
     st.markdown("## 📤 Dokumente hinzufügen")
@@ -782,7 +797,7 @@ else:  # BEREICH_BIBLIOTHEK
                         if st.button(
                             "Endgültig löschen",
                             key=f"bibliothek_confirm_del_{dokument_id}",
-                            type="primary",
+                            type="secondary",
                             use_container_width=True,
                         ):
                             speicher.dokument_loeschen(dokument_id)

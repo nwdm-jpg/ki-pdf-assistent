@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" role="img" aria-label="AVENLOQ">
+  <defs>
+    <linearGradient id="avq-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#2563EB" />
+      <stop offset="100%" stop-color="#7C3AED" />
+    </linearGradient>
+  </defs>
+  <rect width="40" height="40" rx="10" fill="url(#avq-grad)" />
+  <path
+    d="M20 8.5 L29.5 31.5 H24.6 L22.8 26.6 H17.2 L15.4 31.5 H10.5 Z M20 14.8 L17.6 21.6 H22.4 Z"
+    fill="#FFFFFF"
+  />
+</svg>

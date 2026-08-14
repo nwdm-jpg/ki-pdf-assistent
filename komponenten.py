@@ -3,24 +3,46 @@
 Bündelt Darstellung, die in mehreren Bereichen (Startseite, Analyse &
 Vergleich, Dokument prüfen, ggf. künftige Bereiche) identisch aussehen
 soll - Seitenköpfe, leere Zustände, Ergebniskarten, Rückfragen-Chat,
-Quellenangaben, große Startseiten-Karten - damit web_app.py nicht
-dieselbe Streamlit-Auszeichnung mehrfach dupliziert und das
-Erscheinungsbild der App garantiert konsistent bleibt (ein Ort für
-Layout-/Formatierungsentscheidungen statt verstreuter Kopien).
+Quellenangaben, große Startseiten-Karten, die AVENLOQ-Wortmarke - damit
+web_app.py nicht dieselbe Streamlit-Auszeichnung mehrfach dupliziert und
+das Erscheinungsbild der App garantiert konsistent bleibt (ein Ort für
+Layout-/Formatierungs-/Markenentscheidungen statt verstreuter Kopien).
 
-Farben, Radien und Schriftarten kommen bewusst aus dem nativen
-Streamlit-Theme (`.streamlit/config.toml`), nicht aus CSS - hier steckt
-nur die wenige strukturelle CSS-Ergänzung, die config.toml nicht
-abdecken kann (z. B. die Mindesthöhe der großen Startseiten-Karten).
+Grundfarben, Radien und die Sidebar-/Content-Aufteilung kommen bewusst
+aus dem nativen Streamlit-Theme (`.streamlit/config.toml`, inkl. der
+AVENLOQ-Markenpalette), nicht aus CSS. Hier steckt nur, was config.toml
+nicht abdecken kann: die AVENLOQ-Design-Tokens (Farbverlauf-Variable,
+Schriftart), der Blue-→-Violet-Farbverlauf für Primär-Buttons/aktive
+Navigation/Highlights, die Wortmarke und wenige strukturelle
+Ergänzungen (z. B. Mindesthöhe der großen Startseiten-Karten).
 """
 
 import streamlit as st
 
 
-# Nur strukturelle Ergänzungen (Layoutbreite, Kartengröße), keine
-# Farben/Schriftarten - die kommen aus .streamlit/config.toml.
+# Zentrale AVENLOQ-Design-Tokens (Farben/Farbverlauf/Schriftart) +
+# strukturelle Ergänzungen (Layoutbreite, Kartengröße, Wortmarke,
+# Button-Hierarchie), die über das native Theme (.streamlit/config.toml)
+# hinausgehen. Der Blue-→-Violet-Farbverlauf ist bewusst auf
+# Primär-Buttons, aktive Navigation und wenige Highlights (Wortmarke,
+# Tagline) beschränkt - normale UI-Elemente bleiben zurückhaltend/neutral.
 _CSS = """
 <style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+
+:root {
+    --avq-navy: #0D1026;
+    --avq-blue: #2563EB;
+    --avq-violet: #7C3AED;
+    --avq-purple: #A855F7;
+    --avq-lavender: #EDE9FE;
+    --avq-gradient: linear-gradient(135deg, var(--avq-blue) 0%, var(--avq-violet) 100%);
+}
+
+html, body, [class*="css"] {
+    font-family: "Inter", "Segoe UI", sans-serif;
+}
+
 .block-container {
     max-width: 1000px;
     padding-top: 2.5rem;
@@ -31,6 +53,100 @@ _CSS = """
 }
 h1, h2, h3 {
     letter-spacing: -0.01em;
+}
+
+/* AVENLOQ-Wortmarke (Icon + Schriftzug), siehe marke_kopf(). Keine
+   eigene Textfarbe - sie erbt bewusst die Umgebungsfarbe (helle Sidebar-
+   Schrift auf Navy vs. dunkle Schrift im hellen Content-Bereich). */
+.avq-marke {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    margin-bottom: 0.25rem;
+}
+.avq-marke-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    width: 2rem;
+    height: 2rem;
+    border-radius: 0.55rem;
+    background: var(--avq-gradient);
+    color: #FFFFFF !important;
+    font-weight: 800;
+    font-size: 1.05rem;
+    line-height: 1;
+}
+.avq-marke-text {
+    font-weight: 800;
+    letter-spacing: 0.06em;
+    font-size: 1.15rem;
+    text-transform: uppercase;
+}
+.avq-marke--gross .avq-marke-icon {
+    width: 3.25rem;
+    height: 3.25rem;
+    border-radius: 0.85rem;
+    font-size: 1.75rem;
+}
+.avq-marke--gross .avq-marke-text {
+    font-size: 2rem;
+}
+
+/* Tagline auf der Startseite - einer der wenigen bewussten
+   Farbverlauf-Akzente (Highlight), siehe marke_tagline(). */
+.avq-tagline {
+    font-size: 1.35rem;
+    font-weight: 600;
+    line-height: 1.3;
+    margin: 0.9rem 0 0.4rem 0;
+    background: var(--avq-gradient);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+}
+
+/* Zurückhaltender, professioneller Hinweis-Baustein (z. B. Disclaimer
+   in Analyse & Vergleich / Dokument prüfen) statt einer auffälligen
+   Warnbox, siehe hinweis_dezent(). */
+.avq-hinweis {
+    font-size: 0.85rem;
+    color: #52525B;
+    background: var(--avq-lavender);
+    border-left: 3px solid var(--avq-violet);
+    border-radius: 8px;
+    padding: 0.55rem 0.85rem;
+    margin: 0.35rem 0 1rem 0;
+}
+
+/* Primär-Buttons (inkl. aktiver Navigation) erhalten den
+   AVENLOQ-Farbverlauf statt einer einfarbigen Füllung - der einzige
+   Ort im UI, an dem Buttons den Verlauf tragen (Button-Hierarchie). */
+button[kind="primary"],
+[data-testid="stBaseButton-primary"] {
+    background: var(--avq-gradient) !important;
+    border: none !important;
+    color: #FFFFFF !important;
+}
+button[kind="primary"]:hover,
+[data-testid="stBaseButton-primary"]:hover {
+    filter: brightness(1.08);
+    color: #FFFFFF !important;
+}
+
+/* Destruktive Aktion (Dokument endgültig löschen) - eigene, dezente
+   "Danger"-Optik statt des Primär-Farbverlaufs, damit "wichtig" und
+   "gefährlich" visuell nicht verwechselt werden. */
+[class*="st-key-bibliothek_confirm_del_"] button {
+    background: #FFFFFF !important;
+    color: #DC2626 !important;
+    border: 1px solid #FCA5A5 !important;
+}
+[class*="st-key-bibliothek_confirm_del_"] button:hover {
+    background: #FEF2F2 !important;
+    border-color: #DC2626 !important;
+    color: #B91C1C !important;
 }
 
 /* Große, prominente Modus-Karten auf der Startseite */
@@ -69,6 +185,48 @@ h1, h2, h3 {
 def css_einbinden():
     """Bindet die zentrale, projektweite CSS-Ergänzung einmalig ein."""
     st.html(_CSS)
+
+
+def marke_kopf(gross=False):
+    """Rendert die AVENLOQ-Wortmarke (Farbverlauf-Icon + Schriftzug).
+
+    Das Icon ist bewusst ein reines CSS-/Text-Icon (Farbverlauf-Kachel +
+    "A", siehe `.avq-marke-icon` in `_CSS`) statt des inline eingebetteten
+    `assets/logo_icon.svg`: `st.html` sanitisiert seinen Inhalt mit
+    DOMPurify, das SVG-Elemente entfernt, wodurch das Icon unsichtbar
+    bliebe. Die Wortmarke erbt ihre Textfarbe bewusst von der Umgebung
+    (helle Schrift in der dunklen Sidebar, dunkle Schrift im hellen
+    Content-Bereich). `assets/logo_icon.svg`/`assets/logo.svg` bleiben als
+    vorbereitete Quell-Assets bestehen (z. B. für ein späteres Favicon
+    oder eine gerasterte Grafik) - ein endgültiges Logo-Asset kann diese
+    Funktion später ersetzen, ohne dass sich ihre Aufrufstellen ändern
+    müssen.
+    """
+    klasse = "avq-marke avq-marke--gross" if gross else "avq-marke"
+    st.html(
+        f'<div class="{klasse}">'
+        '<span class="avq-marke-icon">A</span>'
+        '<span class="avq-marke-text">AVENLOQ</span>'
+        "</div>"
+    )
+
+
+def marke_tagline():
+    """Rendert den AVENLOQ-Claim als Farbverlauf-Highlight (Startseiten-Hero)."""
+    st.html(
+        '<p class="avq-tagline">Dokumente verstehen.<br>'
+        "Entscheidungen vereinfachen.</p>"
+    )
+
+
+def hinweis_dezent(text):
+    """Zurückhaltender, professioneller Hinweisbaustein (z. B. Disclaimer).
+
+    Ersetzt `st.warning` für wiederkehrende Rechtshinweise (Analyse &
+    Vergleich, Dokument prüfen) - inhaltlich unverändert, aber visuell
+    dezenter/professioneller statt einer auffälligen gelben Warnbox.
+    """
+    st.html(f'<div class="avq-hinweis">{text}</div>')
 
 
 def seiten_kopf(titel, untertitel=None):
