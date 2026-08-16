@@ -63,6 +63,38 @@ def abmelden():
     st.rerun()
 
 
+def abmelden_nach_kontoloeschung():
+    """Wie `abmelden()`, aber nach einer endgültigen Kontolöschung
+    (`konto.py`) - derselbe vollständige `st.session_state.clear()`, damit
+    keinerlei Zustand des gelöschten Kontos zurückbleibt, zusätzlich mit
+    einem einmaligen Hinweis-Flag, das `authentifizierung_anzeigen()`
+    direkt nach dem Zurücksetzen einmalig anzeigt und danach selbst
+    wieder entfernt (`st.session_state.pop`).
+    """
+    st.session_state.clear()
+    st.session_state["_konto_geloescht_hinweis"] = True
+    st.rerun()
+
+
+def sitzung_felder_aktualisieren(**felder):
+    """Aktualisiert einzelne Felder (z. B. `benutzername`/`email`) im
+    Sitzungs-Dict des angemeldeten Benutzers, NACHDEM `speicher.konto_aktualisieren`
+    die Änderung bereits in der Datenbank bestätigt hat - damit die UI
+    (z. B. die Sidebar-Anzeige "👤 <benutzername>") die neuen Werte sofort
+    zeigt, ohne dass sich der Benutzer erneut anmelden muss. Rein additiv:
+    unbekannte Felder werden ignoriert, falls `aktueller_benutzer()` None
+    ist (sollte hier nie vorkommen, da nur nach erfolgreichem Update
+    aufgerufen).
+    """
+    benutzer = aktueller_benutzer()
+
+    if not benutzer:
+        return
+
+    benutzer.update(felder)
+    st.session_state[_SESSION_KEY] = benutzer
+
+
 def _login_versuchen(login_wert, passwort):
     benutzer = speicher.benutzer_nach_login(login_wert)
 
@@ -72,6 +104,10 @@ def _login_versuchen(login_wert, passwort):
             "benutzername": benutzer["benutzername"],
             "email": benutzer["email"],
         }
+        # Nur bei tatsächlich erfolgreichem Login, nicht bei jedem
+        # Skriptlauf - Grundlage für eine künftige Inaktivitäts-Richtlinie
+        # (siehe speicher.letzten_login_aktualisieren).
+        speicher.letzten_login_aktualisieren(benutzer["id"])
         return True
 
     return False
@@ -129,6 +165,9 @@ def _registrieren(benutzername, email, passwort, passwort_wiederholen):
         "benutzername": benutzername,
         "email": email.lower(),
     }
+    # Registrierung meldet direkt an (siehe unten) - zählt für die
+    # Aktivitäts-Nachverfolgung als erster Login.
+    speicher.letzten_login_aktualisieren(neue_id)
     return []
 
 
@@ -201,6 +240,13 @@ def authentifizierung_anzeigen():
         komponenten.marke_tagline()
         st.write("")
 
+        # Einmaliger Hinweis nach einer soeben erfolgten, endgültigen
+        # Kontolöschung (siehe `abmelden_nach_kontoloeschung`) - `pop`
+        # entfernt das Flag sofort wieder, damit es nicht bei einem
+        # späteren Login erneut erscheint.
+        if st.session_state.pop("_konto_geloescht_hinweis", False):
+            st.success("Dein Konto und alle zugehörigen Daten wurden endgültig gelöscht.")
+
         with st.container(border=True):
             modus = st.session_state.get(_MODUS_KEY, "login")
 
@@ -210,6 +256,9 @@ def authentifizierung_anzeigen():
                 _login_formular()
 
 
+BEREICH_KONTO = "⚙️ Konto & Sicherheit"
+
+
 def konto_bereich():
     """Kleiner Konto-/Abmelde-Bereich - wird ans Ende der Sidebar gehängt.
 
@@ -217,12 +266,23 @@ def konto_bereich():
     nicht vorkommen, da die Sidebar nur nach erfolgreichem Login
     überhaupt gezeichnet wird - defensiv trotzdem abgesichert).
 
-    Kompakt und zentriert (Name als dezente Caption, "Abmelden" als
-    neutraler, schmaler Sekundär-Button in einer schmalen mittleren
-    Spalte statt über die volle Sidebar-Breite) - siehe den
-    `st-key-konto_bereich`-CSS-Hook in `komponenten.py` für die
-    Feinabstimmung, die reine Streamlit-Layoutmittel (Spaltenbreiten)
-    nicht abdecken.
+    Kompakt und zentriert (Name als dezente Caption, darunter die kleine
+    "Konto & Sicherheit"-Einstiegsschaltfläche und "Abmelden" - beide als
+    neutrale, kompakte Sekundär-Buttons in ihrer natürlichen Textbreite,
+    NICHT in eine schmale `st.columns`-Spalte gezwängt). Die Zentrierung
+    übernimmt der `st-key-konto_bereich`-CSS-Hook in `komponenten.py`
+    über Flexbox auf dem Container selbst (`align-items: center`) statt
+    über feste Spaltenbreiten-Verhältnisse: Eine feste Spaltenbreite ist
+    nur so breit wie für die Schriftart getestet, mit der sie gebaut
+    wurde - lädt die Inter-Schrift im Browser nicht (z. B. blockiertes
+    Google-Fonts-CDN in einem abgeschotteten Netzwerk), rendert der
+    Fallback-Systemfont "Abmelden" breiter, Streamlits Standard-Button-
+    Stil bricht Beschriftungen nicht um (`white-space: nowrap`) und
+    schneidet sie bei zu wenig Platz sichtbar ab - genau das erzeugte den
+    gemeldeten "melde"-Darstellungsfehler (Mitte von "Abmelden" bleibt
+    sichtbar, beide Enden werden abgeschnitten). Mit natürlicher
+    Button-Breite kann das nicht mehr passieren, unabhängig von Schriftart
+    oder Zoomstufe.
     """
     benutzer = aktueller_benutzer()
 
@@ -234,8 +294,9 @@ def konto_bereich():
     with st.container(key="konto_bereich"):
         st.caption(f"👤 {benutzer['benutzername']}")
 
-        _, mitte_spalte, _ = st.columns([1, 2, 1])
+        if st.button(BEREICH_KONTO, key="konto_seite_button"):
+            st.session_state.aktiver_bereich = BEREICH_KONTO
+            st.rerun()
 
-        with mitte_spalte:
-            if st.button("Abmelden", key="abmelden_button", use_container_width=True):
-                abmelden()
+        if st.button("Abmelden", key="abmelden_button"):
+            abmelden()

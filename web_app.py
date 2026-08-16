@@ -7,6 +7,7 @@ import benutzer
 import dokument_verarbeitung
 import dokumentbibliothek
 import komponenten
+import konto
 import pruefung
 import retrieval
 import speicher
@@ -23,6 +24,10 @@ BEREICH_CHAT = "💬 Chat"
 BEREICH_ANALYSE = "🔍 Analyse & Vergleich"
 BEREICH_PRUEFUNG = "🛡️ Dokument prüfen"
 BEREICH_BIBLIOTHEK = "📚 Dokumentenbibliothek"
+# Kein Eintrag in der Haupt-Sidebar-Navigation (bewusst, siehe Aufgaben-
+# stellung "klein halten") - erreichbar über die kleine Schaltfläche im
+# Konto-/Abmelde-Bereich der Sidebar (siehe `benutzer.konto_bereich`).
+BEREICH_KONTO = benutzer.BEREICH_KONTO
 
 
 st.set_page_config(
@@ -123,6 +128,7 @@ def dateien_verarbeiten(dateien, benutzer_id):
             continue
 
         st.success(f"„{datei.name}“ zur Bibliothek hinzugefügt.")
+        speicher.letzte_aktivitaet_aktualisieren(benutzer_id)
 
 
 def _pruefung_starten(modus, icon, titel, funktion, dokument_ids):
@@ -139,6 +145,7 @@ def _pruefung_starten(modus, icon, titel, funktion, dokument_ids):
             "daten": daten,
             "rueckfragen": [],
         }
+        speicher.letzte_aktivitaet_aktualisieren(benutzer_id)
     except Exception as fehler:
         st.session_state.pruefung_ergebnis = None
         st.error(f"{titel} ist fehlgeschlagen.")
@@ -410,6 +417,7 @@ elif bereich == BEREICH_CHAT:
                     antwort_text,
                     ausgewaehlte_quellen,
                 )
+                speicher.letzte_aktivitaet_aktualisieren(benutzer_id)
 
                 st.rerun()
 
@@ -517,6 +525,7 @@ elif bereich == BEREICH_ANALYSE:
                             "daten": daten,
                             "rueckfragen": [],
                         }
+                        speicher.letzte_aktivitaet_aktualisieren(benutzer_id)
                     except Exception as fehler:
                         st.session_state.analyse_ergebnis = None
                         st.error(f"{aktion['titel']} ist fehlgeschlagen.")
@@ -681,6 +690,10 @@ elif bereich == BEREICH_PRUEFUNG:
                 "Frage zur Prüfung stellen...",
                 "💬 Rückfragen zur Prüfung",
             )
+
+
+elif bereich == BEREICH_KONTO:
+    konto.seite(benutzer_id)
 
 
 else:  # BEREICH_BIBLIOTHEK

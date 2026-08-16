@@ -244,6 +244,20 @@ button[kind="primary"]:disabled,
     color: #B91C1C !important;
 }
 
+/* Zweite destruktive Aktion (Konto endgültig löschen, siehe `konto.py`) -
+   derselbe dezente "Danger"-Optik-Hook, nur mit eigenem Key-Präfix statt
+   den dokumentspezifischen `bibliothek_confirm_del_`-Hook zweckzuentfremden. */
+[class*="st-key-konto_confirm_del_"] button {
+    background: #FFFFFF !important;
+    color: #DC2626 !important;
+    border: 1px solid #FCA5A5 !important;
+}
+[class*="st-key-konto_confirm_del_"] button:hover {
+    background: #FEF2F2 !important;
+    border-color: #DC2626 !important;
+    color: #B91C1C !important;
+}
+
 /* Große, prominente Modus-Karten auf der Startseite. Titel- und
    Beschreibungszeile reservieren eine Mindesthöhe, die dem tatsächlich
    gerenderten Zweizeiler (Titel) bzw. Dreizeiler (Beschreibung) bei
@@ -329,23 +343,47 @@ button[kind="primary"]:disabled,
 
 /* Kompakter Konto-/Abmelde-Bereich am Sidebar-Ende, siehe
    benutzer.konto_bereich(). Name bleibt in der nativen, dezenten
-   Caption-Optik; der "Abmelden"-Button bleibt bewusst der neutrale
-   Sekundär-Button-Typ (kein Farbverlauf, siehe Button-Hierarchie) und
-   wird über eine schmale mittlere Spalte zentriert statt über die
-   volle Sidebar-Breite gezogen, damit er nicht wie eine Hauptaktion
-   wirkt. */
+   Caption-Optik; "Konto & Sicherheit" und "Abmelden" bleiben bewusst
+   der neutrale Sekundär-Button-Typ (kein Farbverlauf, siehe
+   Button-Hierarchie).
+
+   Zentrierung über Flexbox auf dem Container (align-items: center),
+   NICHT über eine schmale feste `st.columns`-Spaltenbreite: Eine feste
+   Spaltenbreite ist nur so breit wie für eine bestimmte Schriftbreite
+   bemessen - lädt der Browser die Inter-Schrift nicht (z. B. blockiertes
+   Google-Fonts-CDN), rendert der Systemfont-Fallback breiter, und
+   Streamlits Standard-Buttons brechen ihre Beschriftung nicht um
+   (white-space: nowrap) - sie schneiden sie bei zu wenig Platz sichtbar
+   ab. Mit natürlicher Button-Breite (kein use_container_width) plus
+   Flex-Zentrierung des Containers bleibt die volle Beschriftung immer
+   sichtbar, unabhängig von Schriftart/Zoom/Sidebar-Breite. */
 [class*="st-key-konto_bereich"] {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
     text-align: center;
     margin-top: 0.25rem;
+    gap: 0.3rem;
 }
 [class*="st-key-konto_bereich"] [data-testid="stCaptionContainer"] {
-    margin-bottom: 0.6rem;
+    margin-bottom: 0.3rem;
     opacity: 0.75;
 }
-[class*="st-key-konto_bereich"] button {
+[class*="st-key-konto_bereich"] .stButton {
+    width: auto;
+}
+[class*="st-key-konto_bereich"] .stButton > button {
+    width: auto;
+    white-space: nowrap;
+    overflow: visible;
     font-size: 0.85rem;
+    padding-left: 1.1rem;
+    padding-right: 1.1rem;
     padding-top: 0.3rem;
     padding-bottom: 0.3rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
 }
 </style>
 """
