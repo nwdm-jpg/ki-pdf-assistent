@@ -298,5 +298,5 @@ def konto_bereich():
             st.session_state.aktiver_bereich = BEREICH_KONTO
             st.rerun()
 
-        if st.button("Abmelden", key="abmelden_button"):
+        if st.button("🚪 Abmelden", key="abmelden_button"):
             abmelden()

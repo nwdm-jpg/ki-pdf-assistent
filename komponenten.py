@@ -61,9 +61,14 @@ h1, h2, h3 {
     letter-spacing: -0.01em;
 }
 
-/* AVENLOQ-Wortmarke (Icon + Schriftzug), siehe marke_kopf(). Keine
-   eigene Textfarbe - sie erbt bewusst die Umgebungsfarbe (helle Sidebar-
-   Schrift auf Navy vs. dunkle Schrift im hellen Content-Bereich). */
+/* AVENLOQ-Wortmarke (Icon + Schriftzug + optionaler, dezenter
+   Produkt-Indikator darunter, z. B. "Documents"), siehe marke_kopf().
+   Keine eigene Textfarbe - sie erbt bewusst die Umgebungsfarbe (helle
+   Sidebar-Schrift auf Navy vs. dunkle Schrift im hellen Content-Bereich).
+   AVENLOQ ist die dominante Plattform-/Konto-Marke, der Produkt-Name
+   (aktuell nur "Documents") steht bewusst kleiner/zurückhaltender
+   darunter statt gleichrangig daneben - siehe CLAUDE.md
+   "Platform & Product Branding". */
 .avq-marke {
     display: flex;
     align-items: center;
@@ -84,11 +89,26 @@ h1, h2, h3 {
     font-size: 1.05rem;
     line-height: 1;
 }
+.avq-marke-wortmarke {
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+    line-height: 1;
+}
 .avq-marke-text {
     font-weight: 800;
     letter-spacing: 0.06em;
     font-size: 1.15rem;
     text-transform: uppercase;
+    line-height: 1;
+}
+.avq-marke-produkt {
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    font-size: 0.65rem;
+    text-transform: uppercase;
+    opacity: 0.65;
+    line-height: 1;
 }
 .avq-marke--gross .avq-marke-icon {
     width: 3.25rem;
@@ -98,6 +118,9 @@ h1, h2, h3 {
 }
 .avq-marke--gross .avq-marke-text {
     font-size: 2rem;
+}
+.avq-marke--gross .avq-marke-produkt {
+    font-size: 0.95rem;
 }
 
 /* Tagline auf der Startseite - einer der wenigen bewussten
@@ -394,8 +417,28 @@ def css_einbinden():
     st.html(_CSS)
 
 
-def marke_kopf(gross=False):
-    """Rendert die AVENLOQ-Wortmarke (Farbverlauf-Icon + Schriftzug).
+# AVENLOQ ist die zentrale Plattform-/Konto-Marke; das aktuelle Produkt
+# ("Documents") ist eines von künftig mehreren AVENLOQ-Produkten auf
+# demselben AVENLOQ-Konto (siehe CLAUDE.md "Platform & Product
+# Branding") - als Modul-Konstante statt eines in marke_kopf()
+# hartkodierten Strings, damit ein künftiges zweites Produkt (z. B.
+# "Invoice"/"Vault") seinen eigenen Produkt-Namen einfach über den
+# `produkt`-Parameter reinreicht, ohne diese Datei anzufassen. Es wird
+# hier bewusst NUR die Konstante für das existierende Produkt vorbereitet
+# - kein Produkt-Switcher, keine Platzhalter für weitere Produkte.
+PRODUKT_NAME = "Documents"
+
+
+def marke_kopf(gross=False, produkt=PRODUKT_NAME):
+    """Rendert die AVENLOQ-Wortmarke (Farbverlauf-Icon + Schriftzug),
+    mit einem optionalen, dezenten Produkt-Indikator (z. B. "Documents")
+    kleiner darunter - AVENLOQ bleibt visuell die dominante Marke, das
+    Produkt steht sichtbar, aber deutlich zurückhaltender (siehe
+    `.avq-marke-produkt` in `_CSS`). `produkt=None` blendet die Zeile
+    aus (z. B. für einen künftigen Kontext ohne Produktbezug); der
+    Parameter existiert bewusst, damit ein späteres zweites AVENLOQ-
+    Produkt dieselbe Funktion mit einem eigenen Namen aufrufen kann,
+    statt eine eigene Wortmarken-Komponente zu bauen.
 
     Das Icon ist bewusst ein reines CSS-/Text-Icon (Farbverlauf-Kachel +
     "A", siehe `.avq-marke-icon` in `_CSS`) statt des inline eingebetteten
@@ -410,10 +453,14 @@ def marke_kopf(gross=False):
     müssen.
     """
     klasse = "avq-marke avq-marke--gross" if gross else "avq-marke"
+    produkt_html = f'<span class="avq-marke-produkt">{produkt}</span>' if produkt else ""
     st.html(
         f'<div class="{klasse}">'
         '<span class="avq-marke-icon">A</span>'
+        '<span class="avq-marke-wortmarke">'
         '<span class="avq-marke-text">AVENLOQ</span>'
+        f"{produkt_html}"
+        "</span>"
         "</div>"
     )
 

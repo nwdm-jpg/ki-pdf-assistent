@@ -245,7 +245,7 @@ def seite(benutzer_id):
     """Rendert den kompletten Bereich "⚙️ Konto & Sicherheit"."""
     komponenten.seiten_kopf(
         benutzer.BEREICH_KONTO,
-        "Verwalte dein Profil, deine Sicherheit und deine Daten.",
+        "Verwalte dein AVENLOQ-Konto und deine Sicherheitseinstellungen.",
     )
 
     konto = speicher.benutzer_konto_daten(benutzer_id)

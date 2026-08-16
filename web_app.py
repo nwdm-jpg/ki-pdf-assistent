@@ -31,7 +31,7 @@ BEREICH_KONTO = benutzer.BEREICH_KONTO
 
 
 st.set_page_config(
-    page_title="AVENLOQ",
+    page_title="AVENLOQ Documents",
     page_icon="🟣",
     layout="wide",
 )
