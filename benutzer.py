@@ -256,7 +256,7 @@ def authentifizierung_anzeigen():
                 _login_formular()
 
 
-BEREICH_KONTO = "⚙️ Konto & Sicherheit"
+BEREICH_KONTO = "⚙ Konto & Sicherheit"
 
 
 def konto_bereich():
@@ -266,23 +266,28 @@ def konto_bereich():
     nicht vorkommen, da die Sidebar nur nach erfolgreichem Login
     überhaupt gezeichnet wird - defensiv trotzdem abgesichert).
 
-    Kompakt und zentriert (Name als dezente Caption, darunter die kleine
-    "Konto & Sicherheit"-Einstiegsschaltfläche und "Abmelden" - beide als
-    neutrale, kompakte Sekundär-Buttons in ihrer natürlichen Textbreite,
-    NICHT in eine schmale `st.columns`-Spalte gezwängt). Die Zentrierung
-    übernimmt der `st-key-konto_bereich`-CSS-Hook in `komponenten.py`
-    über Flexbox auf dem Container selbst (`align-items: center`) statt
-    über feste Spaltenbreiten-Verhältnisse: Eine feste Spaltenbreite ist
-    nur so breit wie für die Schriftart getestet, mit der sie gebaut
-    wurde - lädt die Inter-Schrift im Browser nicht (z. B. blockiertes
-    Google-Fonts-CDN in einem abgeschotteten Netzwerk), rendert der
-    Fallback-Systemfont "Abmelden" breiter, Streamlits Standard-Button-
-    Stil bricht Beschriftungen nicht um (`white-space: nowrap`) und
-    schneidet sie bei zu wenig Platz sichtbar ab - genau das erzeugte den
-    gemeldeten "melde"-Darstellungsfehler (Mitte von "Abmelden" bleibt
-    sichtbar, beide Enden werden abgeschnitten). Mit natürlicher
-    Button-Breite kann das nicht mehr passieren, unabhängig von Schriftart
-    oder Zoomstufe.
+    Name als dezente Caption, darunter "Konto & Sicherheit" und
+    "Abmelden" linksbündig unter dem Namen (nicht zentriert) und in
+    exakt gleicher Breite/Höhe - beide nutzen bewusst
+    `use_container_width=True` statt einer natürlichen Textbreite, damit
+    sie identisch breit sind UND (Lehre aus dem früheren "melde"-Bug,
+    siehe unten) genug Platz für die volle Beschriftung haben, egal wie
+    breit der Text im jeweils geladenen Font ausfällt. Die eigentliche
+    Linksbündigkeit/Größenangleichung übernimmt der
+    `st-key-konto_bereich`-CSS-Hook in `komponenten.py`.
+
+    Icon-Zeichen bewusst als einfache, einfarbige Textsymbole aus dem
+    Standard-Unicode-"Arrows"/"Miscellaneous Symbols"-Bereich (⚙ für
+    Konto, ↪ für Abmelden) statt als mehrbytiger Farb-Emoji (z. B. das
+    vorherige 🚪): Ein Farb-Emoji verlangt eine eigene Emoji-Schriftart
+    und wird in ihrer Abwesenheit (oder wenn eine Übersetzungs-/
+    Eingabehilfe-Erweiterung des Browsers den Text vor dem Rendern
+    anfasst) nicht bloß als Ersatzkästchen, sondern im gemeldeten Fall
+    sogar als völlig anderer, falscher Text ("Sündigen" statt "Abmelden")
+    dargestellt - ein einfaches BMP-Textsymbol wird dagegen von jeder
+    Standard-Systemschrift (auch dem Inter-Fallback) wie gewöhnlicher
+    Text gerendert und ist von genau dieser Klasse Ersetzungsfehler nicht
+    betroffen.
     """
     benutzer = aktueller_benutzer()
 
@@ -294,9 +299,9 @@ def konto_bereich():
     with st.container(key="konto_bereich"):
         st.caption(f"👤 {benutzer['benutzername']}")
 
-        if st.button(BEREICH_KONTO, key="konto_seite_button"):
+        if st.button(BEREICH_KONTO, key="konto_seite_button", use_container_width=True):
             st.session_state.aktiver_bereich = BEREICH_KONTO
             st.rerun()
 
-        if st.button("🚪 Abmelden", key="abmelden_button"):
+        if st.button("↪ Abmelden", key="abmelden_button", use_container_width=True):
             abmelden()

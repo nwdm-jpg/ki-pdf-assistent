@@ -368,45 +368,46 @@ button[kind="primary"]:disabled,
    benutzer.konto_bereich(). Name bleibt in der nativen, dezenten
    Caption-Optik; "Konto & Sicherheit" und "Abmelden" bleiben bewusst
    der neutrale Sekundär-Button-Typ (kein Farbverlauf, siehe
-   Button-Hierarchie).
+   Button-Hierarchie). Randradius kommt bewusst NICHT von hier, sondern
+   einheitlich vom nativen Theme (`buttonRadius` in config.toml) - beide
+   Buttons sind dadurch automatisch identisch abgerundet wie jeder
+   andere Button der App, ohne eigene Regel.
 
-   Zentrierung über Flexbox auf dem Container (align-items: center),
-   NICHT über eine schmale feste `st.columns`-Spaltenbreite: Eine feste
-   Spaltenbreite ist nur so breit wie für eine bestimmte Schriftbreite
-   bemessen - lädt der Browser die Inter-Schrift nicht (z. B. blockiertes
-   Google-Fonts-CDN), rendert der Systemfont-Fallback breiter, und
-   Streamlits Standard-Buttons brechen ihre Beschriftung nicht um
-   (white-space: nowrap) - sie schneiden sie bei zu wenig Platz sichtbar
-   ab. Mit natürlicher Button-Breite (kein use_container_width) plus
-   Flex-Zentrierung des Containers bleibt die volle Beschriftung immer
-   sichtbar, unabhängig von Schriftart/Zoom/Sidebar-Breite. */
+   Linksbündig statt zentriert (align-items: stretch statt center),
+   beide Buttons über `use_container_width=True` (siehe benutzer.py) auf
+   exakt dieselbe Breite wie der Container gebracht - dadurch sind beide
+   Buttons zwangsläufig gleich breit UND linksbündig am selben Rand wie
+   der Name darüber, statt wie zuvor an ihrer (unterschiedlichen)
+   natürlichen Textbreite zentriert zu hängen. justify-content:
+   flex-start + text-align: left richten Icon+Beschriftung innerhalb
+   jedes Buttons links aus statt sie zu zentrieren. */
 [class*="st-key-konto_bereich"] {
     display: flex;
     flex-direction: column;
-    align-items: center;
-    text-align: center;
+    align-items: stretch;
+    text-align: left;
     margin-top: 0.25rem;
     gap: 0.3rem;
 }
 [class*="st-key-konto_bereich"] [data-testid="stCaptionContainer"] {
     margin-bottom: 0.3rem;
     opacity: 0.75;
-}
-[class*="st-key-konto_bereich"] .stButton {
-    width: auto;
+    text-align: left;
 }
 [class*="st-key-konto_bereich"] .stButton > button {
-    width: auto;
+    width: 100%;
     white-space: nowrap;
     overflow: visible;
     font-size: 0.85rem;
+    font-weight: 500;
     padding-left: 1.1rem;
     padding-right: 1.1rem;
     padding-top: 0.3rem;
     padding-bottom: 0.3rem;
     display: flex;
     align-items: center;
-    justify-content: center;
+    justify-content: flex-start;
+    text-align: left;
 }
 </style>
 """
