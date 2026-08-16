@@ -326,6 +326,27 @@ button[kind="primary"]:disabled,
 [class*="st-key-nav_gross_"] {
     margin-bottom: 0.5rem;
 }
+
+/* Kompakter Konto-/Abmelde-Bereich am Sidebar-Ende, siehe
+   benutzer.konto_bereich(). Name bleibt in der nativen, dezenten
+   Caption-Optik; der "Abmelden"-Button bleibt bewusst der neutrale
+   Sekundär-Button-Typ (kein Farbverlauf, siehe Button-Hierarchie) und
+   wird über eine schmale mittlere Spalte zentriert statt über die
+   volle Sidebar-Breite gezogen, damit er nicht wie eine Hauptaktion
+   wirkt. */
+[class*="st-key-konto_bereich"] {
+    text-align: center;
+    margin-top: 0.25rem;
+}
+[class*="st-key-konto_bereich"] [data-testid="stCaptionContainer"] {
+    margin-bottom: 0.6rem;
+    opacity: 0.75;
+}
+[class*="st-key-konto_bereich"] button {
+    font-size: 0.85rem;
+    padding-top: 0.3rem;
+    padding-bottom: 0.3rem;
+}
 </style>
 """
 

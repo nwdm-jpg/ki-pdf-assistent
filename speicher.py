@@ -126,11 +126,25 @@ def _dokumente_tabelle_neu_aufbauen():
     `dokument_ids`-Listen in `chats` weiter gültig bleiben. Wird nur
     aufgerufen, wenn `_dokumente_tabelle_pro_benutzer_eindeutig` False
     liefert (einmalig pro Datenbank).
+
+    `PRAGMA legacy_alter_table = ON` ist hier zwingend nötig: SQLite
+    schreibt bei `ALTER TABLE ... RENAME TO ...` seit 3.25 standardmäßig
+    Fremdschlüssel-Definitionen ANDERER Tabellen, die auf die
+    umbenannte Tabelle verweisen, automatisch auf den neuen Namen um -
+    `chunks.dokument_id REFERENCES dokumente(id)` würde beim Umbenennen
+    von `dokumente` also zu `REFERENCES dokumente_migration_alt(id)`
+    umgeschrieben und würde nach dem `DROP TABLE dokumente_migration_alt`
+    unten auf eine nicht mehr existierende Tabelle zeigen (siehe
+    `_chunks_tabelle_neu_aufbauen`, das genau diesen bereits eingetretenen
+    Schaden aus vor diesem Fix migrierten Datenbanken repariert). Mit
+    `legacy_alter_table = ON` bleibt die Fremdschlüssel-Definition in
+    `chunks` unverändert beim (wieder gültigen) Namen `dokumente`.
     """
     conn = sqlite3.connect(DB_PFAD)
     conn.row_factory = sqlite3.Row
 
     try:
+        conn.execute("PRAGMA legacy_alter_table = ON")
         conn.execute("ALTER TABLE dokumente RENAME TO dokumente_migration_alt")
         conn.execute(
             """
@@ -159,6 +173,84 @@ def _dokumente_tabelle_neu_aufbauen():
             """
         )
         conn.execute("DROP TABLE dokumente_migration_alt")
+        conn.execute("PRAGMA legacy_alter_table = OFF")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def _chunks_tabelle_fremdschluessel_defekt(conn):
+    """Erkennt, ob `chunks.dokument_id` auf die längst gelöschte
+    Zwischentabelle `dokumente_migration_alt` statt auf `dokumente` zeigt.
+
+    Betrifft jede Datenbank, die den `dokumente`-Neuaufbau oben VOR der
+    `PRAGMA legacy_alter_table`-Absicherung durchlaufen hat: SQLite hatte
+    die Fremdschlüssel-Definition in `chunks` beim Umbenennen von
+    `dokumente` automatisch auf `dokumente_migration_alt` umgeschrieben;
+    diese Tabelle existiert danach nicht mehr, weshalb jede
+    fremdschlüsselgeprüfte Schreiboperation auf `chunks` (z. B. neue
+    Chunks nach einem Upload, siehe `chunks_speichern`, immer unter
+    `PRAGMA foreign_keys = ON` aus `_verbindung()`) seitdem mit "no such
+    table: main.dokumente_migration_alt" fehlschlägt. Geprüft wird direkt
+    am gespeicherten Tabellen-DDL in `sqlite_master`.
+    """
+    zeile = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='chunks'"
+    ).fetchone()
+    return bool(zeile) and "dokumente_migration_alt" in (zeile["sql"] or "")
+
+
+def _chunks_tabelle_neu_aufbauen():
+    """Repariert eine `chunks`-Fremdschlüssel-Referenz, die fälschlich auf
+    `dokumente_migration_alt` statt auf `dokumente` zeigt (siehe
+    `_chunks_tabelle_fremdschluessel_defekt`).
+
+    Idempotent und sicher: prüft vorab, ob überhaupt ein Schaden
+    vorliegt, und tut sonst nichts - kann bei jedem Start beliebig oft
+    ausgeführt werden, auch gegen eine bereits reparierte oder eine nie
+    betroffene (frische) Datenbank. Baut `chunks` - analog zu
+    `_dokumente_tabelle_neu_aufbauen` - über eine eigene rohe Verbindung
+    neu auf, mit `PRAGMA legacy_alter_table = ON` während der Umbenennung
+    (nichts referenziert `chunks` selbst per Fremdschlüssel, aber
+    dieselbe Absicherung schadet nicht). Alle bestehenden Chunk-IDs und
+    -Daten inkl. Embeddings bleiben exakt erhalten (expliziter INSERT der
+    Original-ID-Werte).
+    """
+    conn = sqlite3.connect(DB_PFAD)
+    conn.row_factory = sqlite3.Row
+
+    try:
+        if not _chunks_tabelle_fremdschluessel_defekt(conn):
+            return
+
+        conn.execute("PRAGMA legacy_alter_table = ON")
+        conn.execute("ALTER TABLE chunks RENAME TO chunks_migration_alt")
+        conn.execute(
+            """
+            CREATE TABLE chunks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                dokument_id INTEGER NOT NULL REFERENCES dokumente(id) ON DELETE CASCADE,
+                seitennummer INTEGER NOT NULL,
+                text TEXT NOT NULL,
+                embedding BLOB NOT NULL,
+                einheit_typ TEXT NOT NULL DEFAULT 'seite',
+                einheit_anzeige TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO chunks
+                (id, dokument_id, seitennummer, text, embedding, einheit_typ, einheit_anzeige)
+            SELECT id, dokument_id, seitennummer, text, embedding, einheit_typ, einheit_anzeige
+            FROM chunks_migration_alt
+            """
+        )
+        conn.execute("DROP TABLE chunks_migration_alt")
+        conn.execute("PRAGMA legacy_alter_table = OFF")
         conn.commit()
     except Exception:
         conn.rollback()
@@ -261,7 +353,9 @@ def datenbank_initialisieren():
     additiv ergänzen (wirkt nur bei einer bestehenden Alt-Datenbank vor
     der Mehrbenutzer-Umstellung), (3) eigentümerlose Alt-Zeilen einem
     Bootstrap-Konto zuweisen, (4) `dokumente` bei Bedarf mit
-    zusammengesetzter Eindeutigkeit neu aufbauen, (5) Originaldateien in
+    zusammengesetzter Eindeutigkeit neu aufbauen, (5) eine dadurch
+    (bei vor diesem Fix migrierten Datenbanken) defekt gewordene
+    `chunks`-Fremdschlüssel-Referenz reparieren, (6) Originaldateien in
     die Pro-Benutzer-Ordnerstruktur verschieben. Jeder Schritt ist für
     sich idempotent - beliebig oft ausführbar, ohne bestehende Daten zu
     verlieren oder zu duplizieren.
@@ -358,6 +452,14 @@ def datenbank_initialisieren():
 
     if muss_dokumente_neu_aufbauen:
         _dokumente_tabelle_neu_aufbauen()
+
+    # Immer (nicht nur wenn der obige Neuaufbau in diesem Lauf
+    # stattfand) - bereits vor diesem Fix migrierte Datenbanken tragen
+    # den Schaden dauerhaft in ihrem gespeicherten Tabellen-DDL und
+    # brauchen die Reparatur bei jedem Start, bis sie einmal gelaufen
+    # ist; die Funktion selbst prüft und ist ein No-Op, wenn nichts
+    # defekt ist.
+    _chunks_tabelle_neu_aufbauen()
 
     _dateien_migrieren()
 

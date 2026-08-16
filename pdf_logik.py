@@ -169,7 +169,13 @@ def formatiere_quellenhinweis(quellen):
 
 
 def frage_beantworten(frage, relevanter_text, verlauf=None):
-    """Stellt die Frage zusammen mit dem relevanten PDF-Text an die KI.
+    """Stellt die Frage zusammen mit dem relevanten Dokumenttext an die KI.
+
+    Genutzt sowohl von app.py (PDF-only, ein Dokument) als auch von
+    web_app.py (Chat-Bereich, mehrere Dokumente/Formate) - die Formulierung
+    bleibt deshalb bewusst formatneutral ("Dokument" statt "PDF"), auch
+    wenn `relevanter_text` bei app.py tatsächlich immer aus PDF-Seiten
+    stammt.
 
     `verlauf` ist optional eine Liste bisheriger Chat-Einträge
     ({"frage": ..., "antwort": ...}) aus dem aktuellen Gespräch, damit
@@ -179,7 +185,7 @@ def frage_beantworten(frage, relevanter_text, verlauf=None):
     """
     system_text = (
         "Beantworte die Frage ausschließlich anhand der bereitgestellten "
-        "PDF-Seiten. Wenn die Antwort nicht im Text steht, sage das klar."
+        "Dokumentenausschnitte. Wenn die Antwort nicht im Text steht, sage das klar."
     )
 
     if verlauf:
@@ -199,7 +205,7 @@ def frage_beantworten(frage, relevanter_text, verlauf=None):
         {
             "role": "user",
             "content": (
-                f"Relevante PDF-Seiten:\n{relevanter_text}\n\n"
+                f"Relevante Dokumentenausschnitte:\n{relevanter_text}\n\n"
                 f"Frage: {frage}"
             ),
         }

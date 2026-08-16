@@ -216,6 +216,13 @@ def konto_bereich():
     Rendert nichts, wenn niemand angemeldet ist (sollte in der Praxis
     nicht vorkommen, da die Sidebar nur nach erfolgreichem Login
     überhaupt gezeichnet wird - defensiv trotzdem abgesichert).
+
+    Kompakt und zentriert (Name als dezente Caption, "Abmelden" als
+    neutraler, schmaler Sekundär-Button in einer schmalen mittleren
+    Spalte statt über die volle Sidebar-Breite) - siehe den
+    `st-key-konto_bereich`-CSS-Hook in `komponenten.py` für die
+    Feinabstimmung, die reine Streamlit-Layoutmittel (Spaltenbreiten)
+    nicht abdecken.
     """
     benutzer = aktueller_benutzer()
 
@@ -223,7 +230,12 @@ def konto_bereich():
         return
 
     st.divider()
-    st.caption(f"👤 {benutzer['benutzername']}")
 
-    if st.button("Abmelden", key="abmelden_button", use_container_width=True):
-        abmelden()
+    with st.container(key="konto_bereich"):
+        st.caption(f"👤 {benutzer['benutzername']}")
+
+        _, mitte_spalte, _ = st.columns([1, 2, 1])
+
+        with mitte_spalte:
+            if st.button("Abmelden", key="abmelden_button", use_container_width=True):
+                abmelden()
