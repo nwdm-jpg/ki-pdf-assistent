@@ -43,9 +43,15 @@ html, body, [class*="css"] {
     font-family: "Inter", "Segoe UI", sans-serif;
 }
 
+/* Streamlits fixe Kopfzeile (Deploy-/Menü-Leiste) ist absolut
+   positioniert, 60px hoch und deckend (siehe [data-testid="stHeader"]),
+   und liegt über dem Content-Bereich statt Platz für ihn zu reservieren.
+   padding-top MUSS diese 60px überschreiten, sonst rendert der Anfang
+   des Inhalts (insbesondere die große Wortmarke auf der Startseite)
+   unter der Kopfzeile und wird von ihr überdeckt/"abgeschnitten". */
 .block-container {
     max-width: 1000px;
-    padding-top: 2.5rem;
+    padding-top: 4.75rem;
     padding-bottom: 3rem;
 }
 [data-testid="stSidebar"] .block-container {
@@ -122,17 +128,45 @@ h1, h2, h3 {
 
 /* Primär-Buttons (inkl. aktiver Navigation) erhalten den
    AVENLOQ-Farbverlauf statt einer einfarbigen Füllung - der einzige
-   Ort im UI, an dem Buttons den Verlauf tragen (Button-Hierarchie). */
+   Ort im UI, an dem Buttons den Verlauf tragen (Button-Hierarchie).
+   Eine einzige zentrale Regel für alle Primär-Buttons (Startseite,
+   Analyse & Vergleich, aktive Navigation, "Kompletten Check starten")
+   statt Einzelstyling je Seite. font-weight 600 (statt Streamlits
+   Standard 400) macht sie etwas prominenter, ohne die Schriftgröße über
+   die native 16px hinaus zu vergrößern; display:flex + centering ist
+   bereits Streamlits Standardverhalten, wird hier aber explizit
+   festgeschrieben, damit die Zentrierung nicht von künftigen
+   Streamlit-Änderungen abhängt. */
 button[kind="primary"],
 [data-testid="stBaseButton-primary"] {
     background: var(--avq-gradient) !important;
     border: none !important;
     color: #FFFFFF !important;
+    font-weight: 600;
+    font-size: 1rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
 }
 button[kind="primary"]:hover,
 [data-testid="stBaseButton-primary"]:hover {
     filter: brightness(1.08);
     color: #FFFFFF !important;
+}
+
+/* Deaktivierter Primär-Button muss trotz der obigen !important-Regel
+   klar deaktiviert wirken - sonst sähe z. B. eine wegen zu weniger
+   Dokumente gesperrte Analyse-Karte weiterhin wie ein aktiver
+   Farbverlauf-Button aus. Greift für jeden Primär-Button app-weit
+   (Startseite hat aktuell keine deaktivierbaren, daher unkritisch). */
+button[kind="primary"]:disabled,
+[data-testid="stBaseButton-primary"]:disabled {
+    background: #E5E7EB !important;
+    color: #9CA3AF !important;
+    border: 1px solid #E5E7EB !important;
+    filter: none;
+    cursor: not-allowed;
 }
 
 /* Destruktive Aktion (Dokument endgültig löschen) - eigene, dezente
@@ -149,7 +183,15 @@ button[kind="primary"]:hover,
     color: #B91C1C !important;
 }
 
-/* Große, prominente Modus-Karten auf der Startseite */
+/* Große, prominente Modus-Karten auf der Startseite. Titel- und
+   Beschreibungszeile reservieren eine Mindesthöhe, die dem tatsächlich
+   gerenderten Zweizeiler (Titel) bzw. Dreizeiler (Beschreibung) bei
+   dieser Kartenbreite entspricht (per Playwright nachgemessen: 95px /
+   77px) - nicht nur eine grobe Schätzung. Da kein Kartentext diese
+   Reservierung überschreitet, werden alle vier Karten dadurch exakt
+   gleich hoch, unabhängig davon ob Titel/Beschreibung ein- oder
+   mehrzeilig umbrechen; margin-top:auto auf dem Button schiebt ihn in
+   jeder Karte an denselben unteren Rand. */
 [class*="st-key-home_karte_"] {
     padding: 1.5rem 1.25rem 1.25rem 1.25rem;
     min-height: 240px;
@@ -162,9 +204,54 @@ button[kind="primary"]:hover,
 [class*="st-key-home_karte_"] h3 {
     text-align: center;
     margin-top: 0;
+    min-height: 6.1rem;
 }
 [class*="st-key-home_karte_"] p {
     text-align: center;
+    min-height: 5rem;
+}
+[class*="st-key-home_karte_"] .stButton {
+    margin-top: auto;
+    padding-top: 0.75rem;
+}
+
+/* Kompakte Aktions-Karten (Dokument prüfen / Analyse & Vergleich), siehe
+   modus_karte(). Titel/Beschreibung reservieren eine nachgemessene
+   Mindesthöhe für den jeweils längsten real vorkommenden Umbruch (Titel
+   zweizeilig, Beschreibung bis zu dreizeilig bei der schmaleren
+   Analyse-Kartenbreite) - dadurch werden alle Karten einer Gruppe exakt
+   gleich hoch statt nur ungefähr. Die vierte Zeile (Hinweistext bei
+   deaktiviertem Button) wird von modus_karte() IMMER gerendert (als
+   unsichtbarer Platzhalter, wenn kein Hinweis nötig ist), damit
+   Karten mit und ohne Hinweistext nicht unterschiedlich hoch werden,
+   z. B. wenn in Analyse & Vergleich je nach Dokumentauswahl nur ein
+   Teil der Karten deaktiviert ist. margin-top:auto auf dem Button
+   schiebt ihn in jeder Karte an denselben unteren Rand. */
+[class*="st-key-modus_karte_"] > [data-testid="stElementContainer"]:first-child {
+    min-height: 3.25rem;
+}
+[class*="st-key-modus_karte_"] > [data-testid="stElementContainer"]:nth-child(2) {
+    min-height: 4.3rem;
+}
+[class*="st-key-modus_karte_"] > [data-testid="stElementContainer"]:has(.stButton) {
+    margin-top: auto;
+    padding-top: 0.5rem;
+}
+[class*="st-key-modus_karte_"] > [data-testid="stElementContainer"]:nth-child(4) {
+    min-height: 2.8rem;
+}
+
+/* Dokumentenbibliothek-Karten: Titel (Dateiname) reserviert zweizeilige
+   Mindesthöhe, "Löschen"-Popover-Auslöser sitzt per margin-top:auto am
+   unteren Rand - gleiche Idee wie bei den Modus-Karten oben, damit eine
+   Reihe von zwei Karten nicht durch unterschiedlich lange Dateinamen
+   gegeneinander versetzt wirkt. */
+[class*="st-key-bibliothek_karte_"] > [data-testid="stElementContainer"]:first-child {
+    min-height: 2.6rem;
+}
+[class*="st-key-bibliothek_karte_"] > [data-testid="stElementContainer"]:has(.stPopover) {
+    margin-top: auto;
+    padding-top: 0.5rem;
 }
 
 /* Sidebar-Navigation: "Startseite" etwas größer/prominenter als die
@@ -248,21 +335,43 @@ def quellen_hinweis(quellenhinweis):
         st.caption(quellenhinweis)
 
 
-def modus_karte(icon, titel, beschreibung, button_label, key, deaktiviert=False, deaktiviert_hinweis=None):
+def modus_karte(icon, titel, beschreibung, button_label, key, deaktiviert=False, deaktiviert_hinweis=None, button_typ="secondary"):
     """Kompakte Aktions-Karte (z. B. eine Analyse-/Prüfkategorie).
+
+    Trägt einen `st-key-modus_karte_*`-Hook (siehe `_CSS`), damit Titel
+    und Beschreibung unabhängig von ihrer Zeilenzahl gleich viel Platz
+    reservieren und der Button in jeder Karte einer Gruppe auf gleicher
+    Höhe am unteren Rand sitzt - unabhängig davon, ob Titel/Beschreibung
+    ein- oder zweizeilig umbrechen. Wird sowohl von Dokument prüfen als
+    auch von Analyse & Vergleich genutzt, damit beide Kartengruppen
+    automatisch konsistent bleiben.
+
+    `button_typ` steuert nur die Button-Optik (siehe Streamlits eigenes
+    `type=`) - Standard bleibt "secondary" (Dokument prüfen, unverändert),
+    Analyse & Vergleich übergibt "primary" für den AVENLOQ-Farbverlauf.
+    Die zentrale `button[kind="primary"]`-Regel in `_CSS` sorgt dafür,
+    dass ein deaktivierter Primär-Button trotzdem klar deaktiviert
+    aussieht statt fälschlich aktiv zu wirken.
 
     Gibt True zurück, wenn der Button in diesem Lauf geklickt wurde.
     """
-    with st.container(border=True):
+    with st.container(border=True, key=f"modus_karte_{key}"):
         st.markdown(f"**{icon} {titel}**")
         st.caption(beschreibung)
 
         geklickt = st.button(
-            button_label, key=key, use_container_width=True, disabled=deaktiviert
+            button_label,
+            key=key,
+            use_container_width=True,
+            disabled=deaktiviert,
+            type=button_typ,
         )
 
-        if deaktiviert and deaktiviert_hinweis:
-            st.caption(deaktiviert_hinweis)
+        # Immer gerendert (auch als unsichtbarer Platzhalter), damit eine
+        # Karte mit Hinweistext (deaktiviert) nicht höher wird als eine
+        # Karte ohne - sonst würden z. B. in Analyse & Vergleich Karten
+        # derselben Reihe je nach Dokumentauswahl unterschiedlich hoch.
+        st.caption(deaktiviert_hinweis if (deaktiviert and deaktiviert_hinweis) else " ")
 
     return geklickt
 

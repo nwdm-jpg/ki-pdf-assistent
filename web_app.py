@@ -481,6 +481,7 @@ elif bereich == BEREICH_ANALYSE:
                     key=f"analyse_start_{aktion['modus']}",
                     deaktiviert=zu_wenige,
                     deaktiviert_hinweis=hinweis,
+                    button_typ="primary",
                 ):
                     try:
                         with st.spinner(f"{aktion['titel']} wird erstellt..."):
@@ -596,7 +597,7 @@ elif bereich == BEREICH_PRUEFUNG:
         if zu_wenige_komplett:
             st.caption("Wähle mindestens ein Dokument aus, um eine Prüfung zu starten.")
 
-        st.markdown("###### Einzelne Prüfkategorien")
+        st.markdown("#### Einzelne Prüfkategorien")
 
         kategorie_spalten = st.columns(3)
 
@@ -666,10 +667,6 @@ else:  # BEREICH_BIBLIOTHEK
     )
 
     st.markdown("## 📤 Dokumente hinzufügen")
-    st.caption(
-        "Unterstützte Formate: "
-        + ", ".join(endung.upper() for endung in dokument_verarbeitung.SUPPORTED_EXTENSIONS)
-    )
 
     bibliothek_dateien = st.file_uploader(
         "Dateien auswählen",
@@ -774,7 +771,7 @@ else:  # BEREICH_BIBLIOTHEK
                 ).strftime("%d.%m.%Y")
                 groesse = dokumentbibliothek.groesse_text(dokument)
 
-                with spalten[index % 2].container(border=True):
+                with spalten[index % 2].container(border=True, key=f"bibliothek_karte_{dokument_id}"):
                     st.markdown(f"**{dokument['dateiname']}**")
                     st.caption(
                         dokumentbibliothek.dateityp_anzeige(dokument.get("dateityp", "pdf"))
