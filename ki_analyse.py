@@ -51,18 +51,23 @@ QUELLENFORMAT_HINWEIS = (
 )
 
 
-def ausschnitte_ermitteln(dokument_ids, suchanfrage, anzahl_pro_dokument=8, zusatzkontext=""):
+def ausschnitte_ermitteln(dokument_ids, suchanfrage, benutzer_id, anzahl_pro_dokument=8, zusatzkontext=""):
     """Lädt gespeicherte Chunks der Dokumente und wählt die relevantesten aus.
 
-    Wirft `ValueError`, wenn keine Dokumente ausgewählt wurden. Liefert
-    andernfalls eine (ggf. leere) Liste von Chunk-Einträgen - leer ist
-    hier kein Fehler, sondern kann bedeuten, dass zur Suchanfrage nichts
-    Passendes gefunden wurde (relevant z. B. bei Rückfragen).
+    `benutzer_id` wird unverändert an `speicher.chunks_laden` durchgereicht,
+    das die eigentliche Eigentümerprüfung per SQL-Join übernimmt (siehe
+    dort) - IDs in `dokument_ids`, die nicht dem angegebenen Benutzer
+    gehören, liefern schlicht keine Chunks, unabhängig davon, woher die
+    Liste stammt. Wirft `ValueError`, wenn keine Dokumente ausgewählt
+    wurden. Liefert andernfalls eine (ggf. leere) Liste von
+    Chunk-Einträgen - leer ist hier kein Fehler, sondern kann bedeuten,
+    dass zur Suchanfrage nichts Passendes gefunden wurde (relevant z. B.
+    bei Rückfragen).
     """
     if not dokument_ids:
         raise ValueError("Es wurden keine Dokumente ausgewählt.")
 
-    chunks = speicher.chunks_laden(dokument_ids)
+    chunks = speicher.chunks_laden(dokument_ids, benutzer_id)
 
     return relevante_chunks_ermitteln(
         suchanfrage,
@@ -113,7 +118,7 @@ def ki_anfrage(system_text, ausschnitte, frage=None, verlauf=None):
     }
 
 
-def rueckfrage_beantworten(ergebnis_text, dokument_ids, frage, verlauf=None, kontext_label="Ergebnis"):
+def rueckfrage_beantworten(ergebnis_text, dokument_ids, benutzer_id, frage, verlauf=None, kontext_label="Ergebnis"):
     """Beantwortet eine Rückfrage zu einem bereits erstellten Ergebnis.
 
     Generisch nutzbar für Analyse & Vergleich UND Dokument prüfen (siehe
@@ -141,7 +146,7 @@ def rueckfrage_beantworten(ergebnis_text, dokument_ids, frage, verlauf=None, kon
     anzahl_pro_dokument = 4 if anzahl_dokumente == 1 else max(2, 8 // anzahl_dokumente)
 
     ausschnitte = ausschnitte_ermitteln(
-        dokument_ids, frage, anzahl_pro_dokument, zusatzkontext
+        dokument_ids, frage, benutzer_id, anzahl_pro_dokument, zusatzkontext
     )
 
     system_text = (

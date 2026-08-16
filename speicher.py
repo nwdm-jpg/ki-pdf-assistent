@@ -1,12 +1,24 @@
-"""Persistenz für Dokumentbibliothek und Chats (SQLite + lokale Dateikopien).
+"""Persistenz für Benutzerkonten, Dokumentbibliothek und Chats (SQLite +
+lokale Dateikopien), mit strikter Trennung der Daten je Benutzer.
 
 Alle Daten liegen im projektlokalen Ordner `app_daten/` (nicht Teil des
-Git-Repos): `app_daten/bibliothek.db` für Metadaten, Chunks, Embeddings,
-Chats und Nachrichten; `app_daten/pdfs/` für die Originaldateien
-(benannt nach ihrem Datei-Hash + tatsächlicher Endung, zur
-Duplikaterkennung) - der Ordnername ist historisch (aus der PDF-only-
-Zeit) geblieben, enthält inzwischen aber Originaldateien aller
-unterstützten Formate.
+Git-Repos): `app_daten/bibliothek.db` für Benutzerkonten, Metadaten,
+Chunks, Embeddings, Chats und Nachrichten; `app_daten/users/<user_id>/documents/`
+für die Originaldateien (benannt nach ihrem Datei-Hash + tatsächlicher
+Endung, zur Duplikaterkennung je Benutzer) - jeder Benutzer bekommt einen
+eigenen Unterordner, damit ein Benutzer nicht über einen erratenen Pfad
+auf die Datei eines anderen zugreifen kann. Der Ordnername war vor der
+Mehrbenutzer-Umstellung `app_daten/pdfs/` (siehe Migration unten).
+
+WICHTIG - Prinzip der strikten Datentrennung: Jede Funktion, die
+Dokumente, Chunks, Chats oder Nachrichten liest, schreibt oder löscht,
+verlangt einen `benutzer_id`-Parameter und filtert JEDE SQL-Abfrage
+danach (`WHERE user_id = ?` bzw. über einen Join auf `dokumente`/`chats`).
+Es gibt bewusst keine Funktion, die Dokumente oder Chats ohne
+Benutzerbezug liest - die Trennung ist damit in der Persistenzschicht
+selbst erzwungen, nicht nur durch Filterung in der UI (`web_app.py`
+reicht `benutzer_id` aus der angemeldeten Sitzung durch, verlässt sich
+aber nicht darauf als einzige Schutzschicht).
 """
 
 import hashlib
@@ -18,18 +30,35 @@ from pathlib import Path
 
 import numpy as np
 
+import auth
+
 
 APP_DATEN_ORDNER = Path(__file__).resolve().parent / "app_daten"
-PDF_ORDNER = APP_DATEN_ORDNER / "pdfs"
+BENUTZER_ORDNER = APP_DATEN_ORDNER / "users"
 DB_PFAD = APP_DATEN_ORDNER / "bibliothek.db"
 
+# Historischer Name (vor Mehrbenutzer-Umstellung war dies der einzige,
+# gemeinsame Ablageordner aller Originaldateien) - bleibt für die
+# Migration bestehender Dateien in die neue Pro-Benutzer-Struktur
+# relevant, siehe `_dateien_migrieren`.
+_ALTER_PDF_ORDNER = APP_DATEN_ORDNER / "pdfs"
+
 STANDARD_CHAT_TITEL = "Neuer Chat"
+
+# Konto, dem beim Upgrade einer bestehenden (vor Authentifizierung
+# angelegten) Datenbank alle bis dahin eigentümerlosen Dokumente/Chats
+# zugewiesen werden, damit keine bestehenden Testdaten verloren gehen
+# (siehe `_migration_bestandsdaten_zuweisen`). Zugangsdaten sind bewusst
+# fest und einfach, da dies ein lokales Entwicklungs-Bootstrap-Konto ist
+# - siehe Hinweis im Abschluss-Bericht des Auth-Features.
+MIGRATIONS_BENUTZERNAME = "altbestand"
+MIGRATIONS_EMAIL = "altbestand@avenloq.local"
+MIGRATIONS_PASSWORT = "Altbestand123!"
 
 
 @contextmanager
 def _verbindung():
     APP_DATEN_ORDNER.mkdir(exist_ok=True)
-    PDF_ORDNER.mkdir(exist_ok=True)
 
     conn = sqlite3.connect(DB_PFAD)
     conn.row_factory = sqlite3.Row
@@ -64,17 +93,203 @@ def _spalten_ergaenzen(conn, tabelle, spalten):
             conn.execute(f"ALTER TABLE {tabelle} ADD COLUMN {spalte} {definition}")
 
 
+def _dokumente_tabelle_pro_benutzer_eindeutig(conn):
+    """Prüft, ob `dokumente` bereits die Zusatz-Eindeutigkeit (hash, user_id) hat.
+
+    Vor der Mehrbenutzer-Umstellung war `hash` allein global eindeutig
+    (ein Duplikat-Schutz über ALLE Benutzer hinweg) - das würde einem
+    zweiten Benutzer das Hochladen einer inhaltsgleichen Datei
+    verwehren bzw. schlimmer: der Duplikat-Check fände die Zeile des
+    ersten Benutzers und der Upload des zweiten würde still nichts
+    speichern. Erkannt wird der aktuelle Stand am Tabellen-DDL in
+    `sqlite_master`, das bei einer bereits migrierten Tabelle das
+    zusammengesetzte UNIQUE(hash, user_id) enthält.
+    """
+    zeile = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='dokumente'"
+    ).fetchone()
+    return bool(zeile) and "UNIQUE(hash, user_id)" in (zeile["sql"] or "")
+
+
+def _dokumente_tabelle_neu_aufbauen():
+    """Baut `dokumente` mit zusammengesetzter UNIQUE(hash, user_id) neu auf.
+
+    Läuft bewusst über eine EIGENE, rohe sqlite3-Verbindung ohne
+    `PRAGMA foreign_keys = ON` (anders als `_verbindung()`): SQLite
+    lässt `PRAGMA foreign_keys` nicht innerhalb einer bereits laufenden
+    Transaktion umschalten, und der Standard-Wert einer frischen
+    Verbindung ist ohnehin AUS - der Rename/Neuaufbau/Kopiervorgang
+    unten würde mit aktivierten Fremdschlüsseln sonst an der von
+    `chunks.dokument_id` referenzierten Tabelle scheitern. Alle
+    bestehenden IDs bleiben exakt erhalten (expliziter INSERT der
+    Original-ID-Werte), damit `chunks.dokument_id` und die
+    `dokument_ids`-Listen in `chats` weiter gültig bleiben. Wird nur
+    aufgerufen, wenn `_dokumente_tabelle_pro_benutzer_eindeutig` False
+    liefert (einmalig pro Datenbank).
+    """
+    conn = sqlite3.connect(DB_PFAD)
+    conn.row_factory = sqlite3.Row
+
+    try:
+        conn.execute("ALTER TABLE dokumente RENAME TO dokumente_migration_alt")
+        conn.execute(
+            """
+            CREATE TABLE dokumente (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL REFERENCES benutzer(id) ON DELETE CASCADE,
+                dateiname TEXT NOT NULL,
+                hash TEXT NOT NULL,
+                seitenzahl INTEGER NOT NULL,
+                hochgeladen_am TEXT NOT NULL,
+                dateityp TEXT NOT NULL DEFAULT 'pdf',
+                einheit_typ TEXT NOT NULL DEFAULT 'seite',
+                groesse_bytes INTEGER,
+                UNIQUE(hash, user_id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO dokumente
+                (id, user_id, dateiname, hash, seitenzahl, hochgeladen_am,
+                 dateityp, einheit_typ, groesse_bytes)
+            SELECT id, user_id, dateiname, hash, seitenzahl, hochgeladen_am,
+                   dateityp, einheit_typ, groesse_bytes
+            FROM dokumente_migration_alt
+            """
+        )
+        conn.execute("DROP TABLE dokumente_migration_alt")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def _migrations_benutzer_id(conn):
+    """Stellt sicher, dass das Bootstrap-Konto für Altdaten existiert, gibt seine ID zurück."""
+    zeile = conn.execute(
+        "SELECT id FROM benutzer WHERE benutzername = ?", (MIGRATIONS_BENUTZERNAME,)
+    ).fetchone()
+
+    if zeile:
+        return zeile["id"]
+
+    jetzt = _jetzt()
+    cursor = conn.execute(
+        "INSERT INTO benutzer (benutzername, email, passwort_hash, erstellt_am, aktualisiert_am, aktiv) "
+        "VALUES (?, ?, ?, ?, ?, 1)",
+        (
+            MIGRATIONS_BENUTZERNAME,
+            MIGRATIONS_EMAIL,
+            auth.passwort_hash(MIGRATIONS_PASSWORT),
+            jetzt,
+            jetzt,
+        ),
+    )
+    return cursor.lastrowid
+
+
+def _migration_bestandsdaten_zuweisen(conn):
+    """Weist eigentümerlose Alt-Dokumente/-Chats dem Migrations-Konto zu.
+
+    Idempotent: Läuft bei jedem Start, tut aber nichts mehr, sobald
+    keine Zeilen mit `user_id IS NULL` mehr existieren (z. B. bei einer
+    frisch angelegten Datenbank, die von Anfang an `NOT NULL` verlangt,
+    oder nachdem die Migration bereits einmal gelaufen ist).
+    """
+    hat_altdaten = conn.execute(
+        "SELECT 1 FROM dokumente WHERE user_id IS NULL "
+        "UNION SELECT 1 FROM chats WHERE user_id IS NULL LIMIT 1"
+    ).fetchone()
+
+    if not hat_altdaten:
+        return
+
+    migrations_id = _migrations_benutzer_id(conn)
+
+    conn.execute("UPDATE dokumente SET user_id = ? WHERE user_id IS NULL", (migrations_id,))
+    conn.execute("UPDATE chats SET user_id = ? WHERE user_id IS NULL", (migrations_id,))
+
+
+def _dateien_migrieren():
+    """Verschiebt Originaldateien aus dem alten, gemeinsamen `pdfs/`-Ordner
+    in die neue Pro-Benutzer-Struktur (`users/<id>/documents/`).
+
+    Nutzt die inzwischen (in `dokumente` gepflegte) `user_id`, um jede
+    Datei ihrem tatsächlichen Eigentümer zuzuordnen. Bewusst tolerant:
+    fehlt eine erwartete Datei bereits (z. B. weil die Migration
+    unterbrochen und erneut gestartet wurde), wird sie übersprungen
+    statt die App am Start zu hindern.
+    """
+    if not _ALTER_PDF_ORDNER.exists():
+        return
+
+    with _verbindung() as conn:
+        zeilen = conn.execute(
+            "SELECT hash, dateityp, user_id FROM dokumente WHERE user_id IS NOT NULL"
+        ).fetchall()
+
+    for zeile in zeilen:
+        dateityp = zeile["dateityp"] or "pdf"
+        alte_datei = _ALTER_PDF_ORDNER / f"{zeile['hash']}.{dateityp}"
+
+        if not alte_datei.exists():
+            continue
+
+        neuer_ordner = _benutzer_dokumente_ordner(zeile["user_id"])
+        neue_datei = neuer_ordner / alte_datei.name
+
+        if not neue_datei.exists():
+            alte_datei.replace(neue_datei)
+
+    # Leeren Alt-Ordner aufräumen, falls jetzt vollständig migriert.
+    try:
+        next(_ALTER_PDF_ORDNER.iterdir())
+    except StopIteration:
+        _ALTER_PDF_ORDNER.rmdir()
+    except FileNotFoundError:
+        pass
+
+
 def datenbank_initialisieren():
-    """Legt die benötigten Tabellen an bzw. ergänzt fehlende Spalten."""
+    """Legt benötigte Tabellen an, ergänzt fehlende Spalten und migriert Altdaten.
+
+    Reihenfolge ist bewusst: (1) Tabellen inkl. `benutzer` frisch anlegen
+    (wirkt nur bei einer brandneuen Datenbank), (2) fehlende Spalten
+    additiv ergänzen (wirkt nur bei einer bestehenden Alt-Datenbank vor
+    der Mehrbenutzer-Umstellung), (3) eigentümerlose Alt-Zeilen einem
+    Bootstrap-Konto zuweisen, (4) `dokumente` bei Bedarf mit
+    zusammengesetzter Eindeutigkeit neu aufbauen, (5) Originaldateien in
+    die Pro-Benutzer-Ordnerstruktur verschieben. Jeder Schritt ist für
+    sich idempotent - beliebig oft ausführbar, ohne bestehende Daten zu
+    verlieren oder zu duplizieren.
+    """
     with _verbindung() as conn:
         conn.executescript(
             """
+            CREATE TABLE IF NOT EXISTS benutzer (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                benutzername TEXT NOT NULL UNIQUE,
+                email TEXT NOT NULL UNIQUE,
+                passwort_hash TEXT NOT NULL,
+                erstellt_am TEXT NOT NULL,
+                aktualisiert_am TEXT NOT NULL,
+                aktiv INTEGER NOT NULL DEFAULT 1
+            );
+
             CREATE TABLE IF NOT EXISTS dokumente (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL REFERENCES benutzer(id) ON DELETE CASCADE,
                 dateiname TEXT NOT NULL,
-                hash TEXT NOT NULL UNIQUE,
+                hash TEXT NOT NULL,
                 seitenzahl INTEGER NOT NULL,
-                hochgeladen_am TEXT NOT NULL
+                hochgeladen_am TEXT NOT NULL,
+                dateityp TEXT NOT NULL DEFAULT 'pdf',
+                einheit_typ TEXT NOT NULL DEFAULT 'seite',
+                groesse_bytes INTEGER,
+                UNIQUE(hash, user_id)
             );
 
             CREATE TABLE IF NOT EXISTS chunks (
@@ -82,11 +297,14 @@ def datenbank_initialisieren():
                 dokument_id INTEGER NOT NULL REFERENCES dokumente(id) ON DELETE CASCADE,
                 seitennummer INTEGER NOT NULL,
                 text TEXT NOT NULL,
-                embedding BLOB NOT NULL
+                embedding BLOB NOT NULL,
+                einheit_typ TEXT NOT NULL DEFAULT 'seite',
+                einheit_anzeige TEXT
             );
 
             CREATE TABLE IF NOT EXISTS chats (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL REFERENCES benutzer(id) ON DELETE CASCADE,
                 titel TEXT NOT NULL,
                 erstellt_am TEXT NOT NULL,
                 aktualisiert_am TEXT NOT NULL,
@@ -104,11 +322,11 @@ def datenbank_initialisieren():
             """
         )
 
-        # Additive Migration für Bibliotheken, die vor der Mehrformat-
-        # Unterstützung angelegt wurden: bestehende Dokumente gelten als
-        # PDF ("seite"), bis sie durch die tatsächlich gespeicherten
-        # Werte ersetzt werden (was für Alt-Zeilen nicht nötig ist, da
-        # sie tatsächlich PDFs mit Seiten sind).
+        # Additive Migration für Datenbanken, die vor der Mehrformat- bzw.
+        # der Mehrbenutzer-Unterstützung angelegt wurden. `user_id` wird
+        # hier bewusst NULLABLE ergänzt (SQLite kann NOT NULL nicht ohne
+        # Weiteres nachträglich per ADD COLUMN erzwingen) - die
+        # eigentliche Zuweisung übernimmt `_migration_bestandsdaten_zuweisen`.
         _spalten_ergaenzen(
             conn,
             "dokumente",
@@ -116,6 +334,7 @@ def datenbank_initialisieren():
                 ("dateityp", "TEXT NOT NULL DEFAULT 'pdf'"),
                 ("einheit_typ", "TEXT NOT NULL DEFAULT 'seite'"),
                 ("groesse_bytes", "INTEGER"),
+                ("user_id", "INTEGER REFERENCES benutzer(id)"),
             ],
         )
         _spalten_ergaenzen(
@@ -126,42 +345,141 @@ def datenbank_initialisieren():
                 ("einheit_anzeige", "TEXT"),
             ],
         )
+        _spalten_ergaenzen(
+            conn,
+            "chats",
+            [
+                ("user_id", "INTEGER REFERENCES benutzer(id)"),
+            ],
+        )
+
+        _migration_bestandsdaten_zuweisen(conn)
+        muss_dokumente_neu_aufbauen = not _dokumente_tabelle_pro_benutzer_eindeutig(conn)
+
+    if muss_dokumente_neu_aufbauen:
+        _dokumente_tabelle_neu_aufbauen()
+
+    _dateien_migrieren()
 
 
 def _jetzt():
     return datetime.now().isoformat(timespec="seconds")
 
 
-# --- Dokumentbibliothek ---
+# --- Benutzerkonten ---
 
 
-def hash_berechnen(pdf_bytes):
-    return hashlib.sha256(pdf_bytes).hexdigest()
+def benutzer_erstellen(benutzername, email, passwort):
+    """Legt ein neues Benutzerkonto an und gibt die neue Benutzer-ID zurück.
+
+    Wirft `sqlite3.IntegrityError`, wenn Benutzername oder E-Mail schon
+    vergeben sind (`UNIQUE`-Constraints) - `benutzer.py` prüft dies
+    vorab bereits gezielt (für konkrete deutsche Fehlermeldungen), diese
+    Funktion selbst verlässt sich aber nicht allein darauf, sondern auf
+    die Datenbank-Constraints als letzte, verbindliche Schutzschicht.
+    """
+    jetzt = _jetzt()
+
+    with _verbindung() as conn:
+        cursor = conn.execute(
+            "INSERT INTO benutzer (benutzername, email, passwort_hash, erstellt_am, aktualisiert_am, aktiv) "
+            "VALUES (?, ?, ?, ?, ?, 1)",
+            (benutzername.strip(), email.strip().lower(), auth.passwort_hash(passwort), jetzt, jetzt),
+        )
+        return cursor.lastrowid
 
 
-def dokument_nach_hash(hash_wert):
-    """Gibt das gespeicherte Dokument mit diesem Datei-Hash zurück (oder None)."""
+def benutzername_frei(benutzername):
     with _verbindung() as conn:
         zeile = conn.execute(
-            "SELECT * FROM dokumente WHERE hash = ?", (hash_wert,)
+            "SELECT 1 FROM benutzer WHERE benutzername = ?", (benutzername.strip(),)
+        ).fetchone()
+        return zeile is None
+
+
+def email_frei(email):
+    with _verbindung() as conn:
+        zeile = conn.execute(
+            "SELECT 1 FROM benutzer WHERE email = ?", (email.strip().lower(),)
+        ).fetchone()
+        return zeile is None
+
+
+def benutzer_nach_login(login_wert):
+    """Lädt ein aktives Benutzerkonto per Benutzername ODER E-Mail (oder None)."""
+    login_wert = (login_wert or "").strip()
+
+    with _verbindung() as conn:
+        zeile = conn.execute(
+            "SELECT * FROM benutzer WHERE aktiv = 1 AND (benutzername = ? OR email = ?)",
+            (login_wert, login_wert.lower()),
         ).fetchone()
         return dict(zeile) if zeile else None
 
 
-def dokument_speichern(dateiname, hash_wert, datei_bytes, einheiten_anzahl, dateityp, einheit_typ):
-    """Speichert eine Dokumentdatei + Metadaten und gibt die neue Dokument-ID zurück.
+def benutzer_nach_id(benutzer_id):
+    with _verbindung() as conn:
+        zeile = conn.execute(
+            "SELECT id, benutzername, email, erstellt_am, aktiv FROM benutzer WHERE id = ?",
+            (benutzer_id,),
+        ).fetchone()
+        return dict(zeile) if zeile else None
+
+
+# --- Dokumentbibliothek ---
+
+
+def _benutzer_dokumente_ordner(benutzer_id):
+    """Eigener Ablageordner je Benutzer für Original-Dateikopien.
+
+    `benutzer_id` ist immer eine interne Ganzzahl aus der eigenen
+    Datenbank (nie ein von außen übergebener String) - der Pfad ist
+    dadurch inhärent sicher vor Path-Traversal, ganz ohne zusätzliche
+    Sanitisierung des Wertes selbst.
+    """
+    ordner = BENUTZER_ORDNER / str(int(benutzer_id)) / "documents"
+    ordner.mkdir(parents=True, exist_ok=True)
+    return ordner
+
+
+def hash_berechnen(datei_bytes):
+    return hashlib.sha256(datei_bytes).hexdigest()
+
+
+def dokument_nach_hash(hash_wert, benutzer_id):
+    """Gibt das gespeicherte Dokument DIESES Benutzers mit diesem Datei-Hash zurück (oder None).
+
+    Bewusst nach `benutzer_id` gefiltert (nicht nur nach `hash`): der
+    Duplikat-Schutz beim Upload gilt je Benutzer, nicht global - sonst
+    könnte ein Benutzer, dessen Datei zufällig byte-identisch mit der
+    eines anderen Benutzers ist, sein Dokument nicht mehr hochladen
+    bzw. der Check würde fälschlich das fremde Dokument "finden".
+    """
+    with _verbindung() as conn:
+        zeile = conn.execute(
+            "SELECT * FROM dokumente WHERE hash = ? AND user_id = ?",
+            (hash_wert, benutzer_id),
+        ).fetchone()
+        return dict(zeile) if zeile else None
+
+
+def dokument_speichern(dateiname, hash_wert, datei_bytes, einheiten_anzahl, dateityp, einheit_typ, benutzer_id):
+    """Speichert eine Dokumentdatei + Metadaten für den angegebenen Benutzer.
 
     `einheiten_anzahl`/`einheit_typ` sind formatunabhängig zu verstehen:
     Seiten bei PDF, Folien bei PPTX, Tabellenblätter bei XLSX,
     Abschnitte bei DOCX/TXT/MD/CSV (siehe `dokument_verarbeitung.py`).
-    Die Dateigröße wird direkt aus `datei_bytes` ermittelt.
+    Die Originaldatei landet ausschließlich im Ordner dieses Benutzers
+    (`_benutzer_dokumente_ordner`), benannt nach Hash + Dateityp - nie
+    nach dem (nutzergesteuerten) Original-Dateinamen.
     """
     with _verbindung() as conn:
         cursor = conn.execute(
             "INSERT INTO dokumente "
-            "(dateiname, hash, seitenzahl, hochgeladen_am, dateityp, einheit_typ, groesse_bytes) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "(user_id, dateiname, hash, seitenzahl, hochgeladen_am, dateityp, einheit_typ, groesse_bytes) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
+                benutzer_id,
                 dateiname,
                 hash_wert,
                 einheiten_anzahl,
@@ -173,13 +491,19 @@ def dokument_speichern(dateiname, hash_wert, datei_bytes, einheiten_anzahl, date
         )
         dokument_id = cursor.lastrowid
 
-    (PDF_ORDNER / f"{hash_wert}.{dateityp}").write_bytes(datei_bytes)
+    (_benutzer_dokumente_ordner(benutzer_id) / f"{hash_wert}.{dateityp}").write_bytes(datei_bytes)
 
     return dokument_id
 
 
 def chunks_speichern(dokument_id, chunks, embeddings):
-    """Speichert Chunks inkl. Embeddings zu einem Dokument."""
+    """Speichert Chunks inkl. Embeddings zu einem Dokument.
+
+    Kein eigener `benutzer_id`-Parameter nötig: `dokument_id` stammt
+    stets direkt aus dem vorangegangenen `dokument_speichern`-Aufruf
+    (derselbe Upload-Vorgang), Eigentümerschaft ist also bereits über
+    das referenzierte Dokument gegeben.
+    """
     with _verbindung() as conn:
         conn.executemany(
             "INSERT INTO chunks "
@@ -199,30 +523,42 @@ def chunks_speichern(dokument_id, chunks, embeddings):
         )
 
 
-def dokumente_laden():
-    """Gibt alle Dokumente der Bibliothek zurück, neueste zuerst."""
+def dokumente_laden(benutzer_id):
+    """Gibt alle Dokumente DIESES Benutzers zurück, neueste zuerst."""
     with _verbindung() as conn:
         zeilen = conn.execute(
-            "SELECT * FROM dokumente ORDER BY hochgeladen_am DESC"
+            "SELECT * FROM dokumente WHERE user_id = ? ORDER BY hochgeladen_am DESC",
+            (benutzer_id,),
         ).fetchall()
         return [dict(zeile) for zeile in zeilen]
 
 
-def dokument_loeschen(dokument_id):
-    """Entfernt ein Dokument samt Chunks (Kaskade) und seiner PDF-Kopie.
+def dokument_loeschen(dokument_id, benutzer_id):
+    """Entfernt ein Dokument samt Chunks (Kaskade) und seiner Dateikopie -
+    NUR, wenn es tatsächlich dem angegebenen Benutzer gehört.
 
-    Bereinigt außerdem aktiv die Referenz auf diese Dokument-ID in
-    `chats.dokument_ids` für alle Chats (nicht nur lazy beim nächsten
-    Laden, siehe zusätzlich die Filterung in `chat_laden` als
-    Absicherung für evtl. ältere Datenstände).
+    Gehört die ID keinem Dokument dieses Benutzers (falsche ID, fremdes
+    Dokument, bereits gelöscht), passiert schlicht nichts - kein Fehler,
+    aber auch keine Löschung. Bereinigt außerdem aktiv die Referenz auf
+    diese Dokument-ID in `chats.dokument_ids`, beschränkt auf die Chats
+    desselben Benutzers (fremde Chats können diese ID ohnehin nie
+    enthalten haben, da die Auswahl in der UI stets auf eigene Dokumente
+    begrenzt ist - die Einschränkung hier ist zusätzliche Absicherung).
     """
     with _verbindung() as conn:
         zeile = conn.execute(
-            "SELECT hash, dateityp FROM dokumente WHERE id = ?", (dokument_id,)
+            "SELECT hash, dateityp FROM dokumente WHERE id = ? AND user_id = ?",
+            (dokument_id, benutzer_id),
         ).fetchone()
-        conn.execute("DELETE FROM dokumente WHERE id = ?", (dokument_id,))
 
-        for chat_zeile in conn.execute("SELECT id, dokument_ids FROM chats").fetchall():
+        if not zeile:
+            return
+
+        conn.execute("DELETE FROM dokumente WHERE id = ? AND user_id = ?", (dokument_id, benutzer_id))
+
+        for chat_zeile in conn.execute(
+            "SELECT id, dokument_ids FROM chats WHERE user_id = ?", (benutzer_id,)
+        ).fetchall():
             vorhandene_ids = json.loads(chat_zeile["dokument_ids"])
 
             if dokument_id in vorhandene_ids:
@@ -232,13 +568,20 @@ def dokument_loeschen(dokument_id):
                     (json.dumps(bereinigte_ids), chat_zeile["id"]),
                 )
 
-    if zeile:
-        dateityp = zeile["dateityp"] or "pdf"
-        (PDF_ORDNER / f"{zeile['hash']}.{dateityp}").unlink(missing_ok=True)
+    dateityp = zeile["dateityp"] or "pdf"
+    (_benutzer_dokumente_ordner(benutzer_id) / f"{zeile['hash']}.{dateityp}").unlink(missing_ok=True)
 
 
-def chunks_laden(dokument_ids):
-    """Lädt alle Chunks (inkl. Embedding als numpy-Array) der übergebenen Dokumente."""
+def chunks_laden(dokument_ids, benutzer_id):
+    """Lädt Chunks (inkl. Embedding als numpy-Array) der übergebenen Dokumente.
+
+    Der JOIN gegen `dokumente` mit `AND d.user_id = ?` ist die
+    entscheidende Sicherheitsgrenze dieser Funktion: IDs in
+    `dokument_ids`, die nicht (auch) dem angegebenen Benutzer gehören,
+    liefern für diese ID einfach keine Treffer - unabhängig davon, ob
+    `dokument_ids` aus einer vertrauenswürdigen UI-Auswahl stammt oder
+    (versehentlich oder absichtlich) fremde IDs enthält.
+    """
     if not dokument_ids:
         return []
 
@@ -249,8 +592,8 @@ def chunks_laden(dokument_ids):
             f"SELECT c.text, c.seitennummer, c.embedding, c.einheit_typ, "
             f"c.einheit_anzeige, d.dateiname "
             f"FROM chunks c JOIN dokumente d ON d.id = c.dokument_id "
-            f"WHERE c.dokument_id IN ({platzhalter})",
-            dokument_ids,
+            f"WHERE c.dokument_id IN ({platzhalter}) AND d.user_id = ?",
+            (*dokument_ids, benutzer_id),
         ).fetchall()
 
     return [
@@ -269,49 +612,55 @@ def chunks_laden(dokument_ids):
 # --- Chats ---
 
 
-def chat_erstellen(titel=STANDARD_CHAT_TITEL):
+def chat_erstellen(benutzer_id, titel=STANDARD_CHAT_TITEL):
     with _verbindung() as conn:
         jetzt = _jetzt()
         cursor = conn.execute(
-            "INSERT INTO chats (titel, erstellt_am, aktualisiert_am, dokument_ids) "
-            "VALUES (?, ?, ?, '[]')",
-            (titel, jetzt, jetzt),
+            "INSERT INTO chats (user_id, titel, erstellt_am, aktualisiert_am, dokument_ids) "
+            "VALUES (?, ?, ?, ?, '[]')",
+            (benutzer_id, titel, jetzt, jetzt),
         )
         return cursor.lastrowid
 
 
-def chat_liste():
-    """Gibt alle Chats zurück (ohne Nachrichten), zuletzt aktualisiert zuerst."""
+def chat_liste(benutzer_id):
+    """Gibt alle Chats DIESES Benutzers zurück (ohne Nachrichten), zuletzt aktualisiert zuerst."""
     with _verbindung() as conn:
         zeilen = conn.execute(
             "SELECT id, titel, erstellt_am, aktualisiert_am FROM chats "
-            "ORDER BY aktualisiert_am DESC"
+            "WHERE user_id = ? ORDER BY aktualisiert_am DESC",
+            (benutzer_id,),
         ).fetchall()
         return [dict(zeile) for zeile in zeilen]
 
 
-def _existierende_dokument_ids(conn, dokument_ids):
+def _existierende_dokument_ids(conn, dokument_ids, benutzer_id):
     if not dokument_ids:
         return []
 
     platzhalter = ", ".join("?" for _ in dokument_ids)
     zeilen = conn.execute(
-        f"SELECT id FROM dokumente WHERE id IN ({platzhalter})", dokument_ids
+        f"SELECT id FROM dokumente WHERE id IN ({platzhalter}) AND user_id = ?",
+        (*dokument_ids, benutzer_id),
     ).fetchall()
     vorhandene_ids = {zeile["id"] for zeile in zeilen}
 
     return [i for i in dokument_ids if i in vorhandene_ids]
 
 
-def chat_laden(chat_id):
-    """Lädt einen Chat inkl. Nachrichten, oder None falls nicht vorhanden.
+def chat_laden(chat_id, benutzer_id):
+    """Lädt einen Chat DIESES Benutzers inkl. Nachrichten, oder None.
 
-    `dokument_ids` wird auf noch existierende Dokumente gefiltert, damit
-    zwischenzeitlich gelöschte Dokumente nicht mehr als aktiv gelten.
+    Gehört `chat_id` keinem Chat dieses Benutzers, wird `None`
+    zurückgegeben - identisch zum "existiert nicht"-Fall, damit sich
+    aus der Antwort nicht ableiten lässt, ob die ID zu einem fremden
+    Chat gehört oder schlicht nicht existiert. `dokument_ids` wird
+    zusätzlich auf noch existierende UND weiterhin diesem Benutzer
+    gehörende Dokumente gefiltert.
     """
     with _verbindung() as conn:
         chat_zeile = conn.execute(
-            "SELECT * FROM chats WHERE id = ?", (chat_id,)
+            "SELECT * FROM chats WHERE id = ? AND user_id = ?", (chat_id, benutzer_id)
         ).fetchone()
 
         if not chat_zeile:
@@ -323,7 +672,7 @@ def chat_laden(chat_id):
         ).fetchall()
 
         dokument_ids = _existierende_dokument_ids(
-            conn, json.loads(chat_zeile["dokument_ids"])
+            conn, json.loads(chat_zeile["dokument_ids"]), benutzer_id
         )
 
     chat = dict(chat_zeile)
@@ -345,17 +694,34 @@ def chat_laden(chat_id):
     return chat
 
 
-def chat_dokumente_setzen(chat_id, dokument_ids):
+def chat_dokumente_setzen(chat_id, dokument_ids, benutzer_id):
+    """Setzt die aktiven Dokumente eines Chats - nur für Chat UND Dokumente des Benutzers.
+
+    `dokument_ids` wird vor dem Speichern auf tatsächlich existierende,
+    dem Benutzer gehörende Dokumente gefiltert - selbst wenn die
+    aufrufende UI (die nur eigene Dokumente zur Auswahl anbietet)
+    fehlerhaft fremde IDs übergeben würde, könnten diese nie in einem
+    Chat landen.
+    """
     with _verbindung() as conn:
+        gehoert_dem_benutzer = conn.execute(
+            "SELECT 1 FROM chats WHERE id = ? AND user_id = ?", (chat_id, benutzer_id)
+        ).fetchone()
+
+        if not gehoert_dem_benutzer:
+            return
+
+        gueltige_ids = _existierende_dokument_ids(conn, list(dokument_ids), benutzer_id)
+
         conn.execute(
-            "UPDATE chats SET dokument_ids = ? WHERE id = ?",
-            (json.dumps(list(dokument_ids)), chat_id),
+            "UPDATE chats SET dokument_ids = ? WHERE id = ? AND user_id = ?",
+            (json.dumps(gueltige_ids), chat_id, benutzer_id),
         )
 
 
-def chat_loeschen(chat_id):
+def chat_loeschen(chat_id, benutzer_id):
     with _verbindung() as conn:
-        conn.execute("DELETE FROM chats WHERE id = ?", (chat_id,))
+        conn.execute("DELETE FROM chats WHERE id = ? AND user_id = ?", (chat_id, benutzer_id))
 
 
 def _kurztitel_erzeugen(frage):
@@ -378,15 +744,25 @@ def _kurztitel_erzeugen(frage):
     return f"{gekuerzt}…" if gekuerzt else f"{frage[:45]}…"
 
 
-def nachricht_hinzufuegen(chat_id, frage, antwort, quellen):
+def nachricht_hinzufuegen(chat_id, benutzer_id, frage, antwort, quellen):
     """Speichert eine Chatrunde und aktualisiert Zeitstempel/Titel des Chats.
 
-    Der Titel wird nur bei der ersten Nachricht eines Chats automatisch
-    aus der Frage abgeleitet (und nur, wenn er noch der Standardtitel ist).
+    Prüft zuerst, ob `chat_id` tatsächlich diesem Benutzer gehört -
+    ohne diese Prüfung könnte eine manipulierte `chat_id` sonst eine
+    Nachricht in einen fremden Chat schreiben. Der Titel wird nur bei
+    der ersten Nachricht eines Chats automatisch aus der Frage
+    abgeleitet (und nur, wenn er noch der Standardtitel ist).
     """
     jetzt = _jetzt()
 
     with _verbindung() as conn:
+        gehoert_dem_benutzer = conn.execute(
+            "SELECT titel FROM chats WHERE id = ? AND user_id = ?", (chat_id, benutzer_id)
+        ).fetchone()
+
+        if not gehoert_dem_benutzer:
+            raise PermissionError("Dieser Chat gehört nicht zum angemeldeten Benutzer.")
+
         conn.execute(
             "INSERT INTO nachrichten (chat_id, frage, antwort, quellen, erstellt_am) "
             "VALUES (?, ?, ?, ?, ?)",
@@ -398,16 +774,12 @@ def nachricht_hinzufuegen(chat_id, frage, antwort, quellen):
             (chat_id,),
         ).fetchone()
 
-        titel_zeile = conn.execute(
-            "SELECT titel FROM chats WHERE id = ?", (chat_id,)
-        ).fetchone()
-
-        neuer_titel = titel_zeile["titel"]
+        neuer_titel = gehoert_dem_benutzer["titel"]
 
         if anzahl_zeile["anzahl"] == 1 and neuer_titel == STANDARD_CHAT_TITEL:
             neuer_titel = _kurztitel_erzeugen(frage)
 
         conn.execute(
-            "UPDATE chats SET aktualisiert_am = ?, titel = ? WHERE id = ?",
-            (jetzt, neuer_titel, chat_id),
+            "UPDATE chats SET aktualisiert_am = ?, titel = ? WHERE id = ? AND user_id = ?",
+            (jetzt, neuer_titel, chat_id, benutzer_id),
         )

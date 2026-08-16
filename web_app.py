@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 import streamlit as st
 
 import analyse
+import benutzer
 import dokument_verarbeitung
 import dokumentbibliothek
 import komponenten
@@ -36,10 +37,24 @@ komponenten.css_einbinden()
 speicher.datenbank_initialisieren()
 
 
+# Authentifizierungs-Schranke: Solange niemand angemeldet ist, wird
+# ausschließlich die Anmelde-/Registrierungsseite gerendert und der
+# Skriptlauf danach per st.stop() beendet - die normale AVENLOQ-
+# Navigation/-Oberfläche (inkl. Sidebar) wird dafür gar nicht erst
+# aufgebaut. `benutzer_id` ist ab hier für den Rest des Laufs bekannt
+# und wird an jede Speicher-/Analyse-/Prüfungsfunktion durchgereicht,
+# die auf benutzereigene Daten zugreift.
+if not benutzer.ist_angemeldet():
+    benutzer.authentifizierung_anzeigen()
+    st.stop()
+
+benutzer_id = benutzer.aktueller_benutzer_id()
+
+
 if "aktueller_chat_id" not in st.session_state:
-    vorhandene_chats = speicher.chat_liste()
+    vorhandene_chats = speicher.chat_liste(benutzer_id)
     st.session_state.aktueller_chat_id = (
-        vorhandene_chats[0]["id"] if vorhandene_chats else speicher.chat_erstellen()
+        vorhandene_chats[0]["id"] if vorhandene_chats else speicher.chat_erstellen(benutzer_id)
     )
 
 # Bewusst eine reine Session-State-Variable (nicht an ein einzelnes
@@ -53,7 +68,7 @@ if "aktiver_bereich" not in st.session_state:
     st.session_state.aktiver_bereich = BEREICH_START
 
 
-def dateien_verarbeiten(dateien):
+def dateien_verarbeiten(dateien, benutzer_id):
     """Verarbeitet hochgeladene Dateien: Text extrahieren, chunken, Embeddings, Speichern.
 
     Die einzige Verarbeitungs-/Speicherimplementierung der App - genutzt
@@ -61,13 +76,14 @@ def dateien_verarbeiten(dateien):
     es nur einen Verarbeitungsweg gibt. Die Formaterkennung (PDF, DOCX,
     TXT, MD, CSV, XLSX, PPTX) übernimmt `dokument_verarbeitung`; nicht
     unterstützte Dateitypen führen zu einer klaren deutschen
-    Fehlermeldung statt eines Absturzes.
+    Fehlermeldung statt eines Absturzes. Jedes verarbeitete Dokument
+    wird direkt dem hochladenden Benutzer zugeordnet (`benutzer_id`).
     """
     for datei in dateien or []:
         datei_bytes = datei.getvalue()
         hash_wert = speicher.hash_berechnen(datei_bytes)
 
-        if speicher.dokument_nach_hash(hash_wert):
+        if speicher.dokument_nach_hash(hash_wert, benutzer_id):
             continue
 
         try:
@@ -98,6 +114,7 @@ def dateien_verarbeiten(dateien):
                     einheiten_anzahl,
                     dateityp,
                     einheit_typ,
+                    benutzer_id,
                 )
                 speicher.chunks_speichern(dokument_id, chunks, embeddings)
         except Exception as fehler:
@@ -154,12 +171,12 @@ with st.sidebar:
 
     if bereich == BEREICH_CHAT:
         if st.button("＋ Neuer Chat", use_container_width=True):
-            st.session_state.aktueller_chat_id = speicher.chat_erstellen()
+            st.session_state.aktueller_chat_id = speicher.chat_erstellen(benutzer_id)
             st.rerun()
 
         st.markdown("#### Chats")
 
-        chats = speicher.chat_liste()
+        chats = speicher.chat_liste(benutzer_id)
 
         for chat in chats:
             ist_aktiv = chat["id"] == st.session_state.aktueller_chat_id
@@ -175,14 +192,14 @@ with st.sidebar:
                 st.rerun()
 
             if spalte_loeschen.button("🗑", key=f"del_chat_{chat['id']}"):
-                speicher.chat_loeschen(chat["id"])
+                speicher.chat_loeschen(chat["id"], benutzer_id)
 
                 if ist_aktiv:
                     uebrige_chats = [c for c in chats if c["id"] != chat["id"]]
                     st.session_state.aktueller_chat_id = (
                         uebrige_chats[0]["id"]
                         if uebrige_chats
-                        else speicher.chat_erstellen()
+                        else speicher.chat_erstellen(benutzer_id)
                     )
 
                 st.rerun()
@@ -191,8 +208,8 @@ with st.sidebar:
         st.markdown("#### 📄 Dokumente in diesem Chat")
 
         aktueller_chat_id = st.session_state.aktueller_chat_id
-        aktueller_chat = speicher.chat_laden(aktueller_chat_id)
-        alle_dokumente_sidebar = speicher.dokumente_laden()
+        aktueller_chat = speicher.chat_laden(aktueller_chat_id, benutzer_id)
+        alle_dokumente_sidebar = speicher.dokumente_laden(benutzer_id)
 
         if not alle_dokumente_sidebar:
             komponenten.leerer_zustand("Noch keine Dokumente in der Bibliothek.")
@@ -218,8 +235,12 @@ with st.sidebar:
             )
 
             if set(ausgewaehlte_ids) != set(aktueller_chat["dokument_ids"]):
-                speicher.chat_dokumente_setzen(aktueller_chat_id, ausgewaehlte_ids)
+                speicher.chat_dokumente_setzen(aktueller_chat_id, ausgewaehlte_ids, benutzer_id)
                 st.rerun()
+
+    # Kleiner Konto-/Abmelde-Bereich am Ende der Sidebar, unabhängig vom
+    # aktiven Bereich immer sichtbar (siehe benutzer.konto_bereich).
+    benutzer.konto_bereich()
 
 
 if bereich == BEREICH_START:
@@ -230,8 +251,8 @@ if bereich == BEREICH_START:
         "und wichtige Informationen zu finden."
     )
 
-    alle_dokumente_start = speicher.dokumente_laden()
-    alle_chats_start = speicher.chat_liste()
+    alle_dokumente_start = speicher.dokumente_laden(benutzer_id)
+    alle_chats_start = speicher.chat_liste(benutzer_id)
 
     spalte_stat_dokumente, spalte_stat_chats = st.columns(2)
     spalte_stat_dokumente.metric("Dokumente", len(alle_dokumente_start))
@@ -304,8 +325,8 @@ if bereich == BEREICH_START:
 
 
 elif bereich == BEREICH_CHAT:
-    aktueller_chat = speicher.chat_laden(st.session_state.aktueller_chat_id)
-    alle_dokumente = {dokument["id"]: dokument for dokument in speicher.dokumente_laden()}
+    aktueller_chat = speicher.chat_laden(st.session_state.aktueller_chat_id, benutzer_id)
+    alle_dokumente = {dokument["id"]: dokument for dokument in speicher.dokumente_laden(benutzer_id)}
     aktive_dokumente = [
         alle_dokumente[i] for i in aktueller_chat["dokument_ids"] if i in alle_dokumente
     ]
@@ -359,7 +380,7 @@ elif bereich == BEREICH_CHAT:
             try:
                 with st.spinner("Durchsuche deine Dokumente..."):
                     alle_chunks = speicher.chunks_laden(
-                        [dokument["id"] for dokument in aktive_dokumente]
+                        [dokument["id"] for dokument in aktive_dokumente], benutzer_id
                     )
                     beste_chunks = retrieval.relevante_chunks_ermitteln(
                         frage,
@@ -384,6 +405,7 @@ elif bereich == BEREICH_CHAT:
 
                 speicher.nachricht_hinzufuegen(
                     st.session_state.aktueller_chat_id,
+                    benutzer_id,
                     frage,
                     antwort_text,
                     ausgewaehlte_quellen,
@@ -402,7 +424,7 @@ elif bereich == BEREICH_ANALYSE:
         "Fasse Dokumente zusammen, vergleiche Inhalte und finde wichtige Fristen.",
     )
 
-    alle_dokumente_liste = speicher.dokumente_laden()
+    alle_dokumente_liste = speicher.dokumente_laden(benutzer_id)
 
     if not alle_dokumente_liste:
         komponenten.leerer_zustand("Füge zuerst ein Dokument zu deiner Dokumentenbibliothek hinzu.")
@@ -485,7 +507,7 @@ elif bereich == BEREICH_ANALYSE:
                 ):
                     try:
                         with st.spinner(f"{aktion['titel']} wird erstellt..."):
-                            daten = aktion["funktion"](ausgewaehlte_ids)
+                            daten = aktion["funktion"](ausgewaehlte_ids, benutzer_id)
 
                         st.session_state.analyse_ergebnis = {
                             "modus": aktion["modus"],
@@ -530,7 +552,7 @@ elif bereich == BEREICH_ANALYSE:
                 ergebnis,
                 "analyse_ergebnis",
                 lambda erg, frage: analyse.rueckfrage_beantworten(
-                    erg["daten"]["text"], erg["dokument_ids"], frage, verlauf=erg["rueckfragen"]
+                    erg["daten"]["text"], erg["dokument_ids"], benutzer_id, frage, verlauf=erg["rueckfragen"]
                 ),
                 "Frage zur Analyse stellen...",
                 "💬 Rückfragen zur Analyse",
@@ -543,7 +565,7 @@ elif bereich == BEREICH_PRUEFUNG:
         "Lass wichtige Stellen, Risiken, Pflichten und Fristen automatisch prüfen.",
     )
 
-    alle_dokumente_liste = speicher.dokumente_laden()
+    alle_dokumente_liste = speicher.dokumente_laden(benutzer_id)
 
     if not alle_dokumente_liste:
         komponenten.leerer_zustand("Füge zuerst ein Dokument zu deiner Dokumentenbibliothek hinzu.")
@@ -590,7 +612,7 @@ elif bereich == BEREICH_PRUEFUNG:
                 "komplett",
                 "🛡️",
                 "Kompletter Dokumenten-Check",
-                lambda: pruefung.kompletter_check(ausgewaehlte_ids, preset_id),
+                lambda: pruefung.kompletter_check(ausgewaehlte_ids, benutzer_id, preset_id),
                 ausgewaehlte_ids,
             )
 
@@ -619,7 +641,7 @@ elif bereich == BEREICH_PRUEFUNG:
                         kategorie["icon"],
                         kategorie["titel"],
                         lambda kid=kategorie_id: pruefung.einzelpruefung(
-                            kid, ausgewaehlte_ids, preset_id
+                            kid, ausgewaehlte_ids, benutzer_id, preset_id
                         ),
                         ausgewaehlte_ids,
                     )
@@ -654,7 +676,7 @@ elif bereich == BEREICH_PRUEFUNG:
                 ergebnis,
                 "pruefung_ergebnis",
                 lambda erg, frage: pruefung.rueckfrage_beantworten(
-                    erg["daten"]["text"], erg["dokument_ids"], frage, verlauf=erg["rueckfragen"]
+                    erg["daten"]["text"], erg["dokument_ids"], benutzer_id, frage, verlauf=erg["rueckfragen"]
                 ),
                 "Frage zur Prüfung stellen...",
                 "💬 Rückfragen zur Prüfung",
@@ -676,11 +698,11 @@ else:  # BEREICH_BIBLIOTHEK
         key="bibliothek_uploader",
         label_visibility="collapsed",
     )
-    dateien_verarbeiten(bibliothek_dateien)
+    dateien_verarbeiten(bibliothek_dateien, benutzer_id)
 
     st.divider()
 
-    alle_dokumente_bibliothek = speicher.dokumente_laden()
+    alle_dokumente_bibliothek = speicher.dokumente_laden(benutzer_id)
     wort = "Dokument" if len(alle_dokumente_bibliothek) == 1 else "Dokumente"
     st.markdown(f"## 📚 {len(alle_dokumente_bibliothek)} {wort} in deiner Bibliothek")
 
@@ -798,5 +820,5 @@ else:  # BEREICH_BIBLIOTHEK
                             type="secondary",
                             use_container_width=True,
                         ):
-                            speicher.dokument_loeschen(dokument_id)
+                            speicher.dokument_loeschen(dokument_id, benutzer_id)
                             st.rerun()

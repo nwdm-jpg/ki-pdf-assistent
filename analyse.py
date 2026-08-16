@@ -125,9 +125,9 @@ RISIKEN_SYSTEM = (
 )
 
 
-def _analyse_durchfuehren(system_text, suchanfrage, dokument_ids):
+def _analyse_durchfuehren(system_text, suchanfrage, dokument_ids, benutzer_id):
     ausschnitte = ki_analyse.ausschnitte_ermitteln(
-        dokument_ids, suchanfrage, CHUNKS_PRO_DOKUMENT
+        dokument_ids, suchanfrage, benutzer_id, CHUNKS_PRO_DOKUMENT
     )
 
     if not ausschnitte:
@@ -139,14 +139,14 @@ def _analyse_durchfuehren(system_text, suchanfrage, dokument_ids):
     return ki_analyse.ki_anfrage(system_text, ausschnitte)
 
 
-def zusammenfassen(dokument_ids):
+def zusammenfassen(dokument_ids, benutzer_id):
     """Erstellt eine strukturierte Zusammenfassung eines oder mehrerer Dokumente."""
     return _analyse_durchfuehren(
-        ZUSAMMENFASSEN_SYSTEM, ZUSAMMENFASSEN_SUCHANFRAGE, dokument_ids
+        ZUSAMMENFASSEN_SYSTEM, ZUSAMMENFASSEN_SUCHANFRAGE, dokument_ids, benutzer_id
     )
 
 
-def vergleichen(dokument_ids):
+def vergleichen(dokument_ids, benutzer_id):
     """Vergleicht mindestens zwei Dokumente strukturiert (Tabelle + Unterschiede)."""
     dokument_ids = list(dict.fromkeys(dokument_ids))
 
@@ -154,21 +154,21 @@ def vergleichen(dokument_ids):
         raise ValueError("Für einen Vergleich werden mindestens zwei Dokumente benötigt.")
 
     return _analyse_durchfuehren(
-        VERGLEICHEN_SYSTEM, VERGLEICHEN_SUCHANFRAGE, dokument_ids
+        VERGLEICHEN_SYSTEM, VERGLEICHEN_SUCHANFRAGE, dokument_ids, benutzer_id
     )
 
 
-def fristen_ermitteln(dokument_ids):
+def fristen_ermitteln(dokument_ids, benutzer_id):
     """Extrahiert Fristen, Termine und zeitkritische Verpflichtungen."""
-    return _analyse_durchfuehren(FRISTEN_SYSTEM, FRISTEN_SUCHANFRAGE, dokument_ids)
+    return _analyse_durchfuehren(FRISTEN_SYSTEM, FRISTEN_SUCHANFRAGE, dokument_ids, benutzer_id)
 
 
-def risiken_ermitteln(dokument_ids):
+def risiken_ermitteln(dokument_ids, benutzer_id):
     """Hebt potenziell wichtige/ungewöhnliche Klauseln und Bedingungen hervor."""
-    return _analyse_durchfuehren(RISIKEN_SYSTEM, RISIKEN_SUCHANFRAGE, dokument_ids)
+    return _analyse_durchfuehren(RISIKEN_SYSTEM, RISIKEN_SUCHANFRAGE, dokument_ids, benutzer_id)
 
 
-def rueckfrage_beantworten(analyse_ergebnis_text, dokument_ids, frage, verlauf=None):
+def rueckfrage_beantworten(analyse_ergebnis_text, dokument_ids, benutzer_id, frage, verlauf=None):
     """Beantwortet eine Rückfrage zu einem bereits erstellten Analyseergebnis.
 
     Getrennt von `pdf_logik.frage_beantworten` (normaler Chat) und von
@@ -179,6 +179,7 @@ def rueckfrage_beantworten(analyse_ergebnis_text, dokument_ids, frage, verlauf=N
     return ki_analyse.rueckfrage_beantworten(
         analyse_ergebnis_text,
         dokument_ids,
+        benutzer_id,
         frage,
         verlauf=verlauf,
         kontext_label="Analyseergebnis",

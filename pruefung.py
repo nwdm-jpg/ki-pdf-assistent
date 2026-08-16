@@ -227,7 +227,7 @@ def _kompletter_check_system(preset_id):
     )
 
 
-def einzelpruefung(kategorie_id, dokument_ids, preset_id=PRESET_STANDARD):
+def einzelpruefung(kategorie_id, dokument_ids, benutzer_id, preset_id=PRESET_STANDARD):
     """Führt eine einzelne Prüfkategorie über die ausgewählten Dokumente aus."""
     if kategorie_id not in KATEGORIEN:
         raise ValueError(f"Unbekannte Prüfkategorie: {kategorie_id}")
@@ -235,7 +235,7 @@ def einzelpruefung(kategorie_id, dokument_ids, preset_id=PRESET_STANDARD):
     kategorie = KATEGORIEN[kategorie_id]
 
     ausschnitte = ki_analyse.ausschnitte_ermitteln(
-        dokument_ids, kategorie["suchanfrage"], CHUNKS_PRO_DOKUMENT
+        dokument_ids, kategorie["suchanfrage"], benutzer_id, CHUNKS_PRO_DOKUMENT
     )
 
     if not ausschnitte:
@@ -249,7 +249,7 @@ def einzelpruefung(kategorie_id, dokument_ids, preset_id=PRESET_STANDARD):
     return ki_analyse.ki_anfrage(system_text, ausschnitte)
 
 
-def kompletter_check(dokument_ids, preset_id=PRESET_STANDARD):
+def kompletter_check(dokument_ids, benutzer_id, preset_id=PRESET_STANDARD):
     """Kombinierter Check über alle Kategorien in EINEM Modellaufruf.
 
     Bewusst nicht als sechs unabhängige `einzelpruefung`-Aufrufe
@@ -264,7 +264,7 @@ def kompletter_check(dokument_ids, preset_id=PRESET_STANDARD):
     )
 
     ausschnitte = ki_analyse.ausschnitte_ermitteln(
-        dokument_ids, kombinierte_suchanfrage, CHUNKS_PRO_DOKUMENT_KOMPLETT
+        dokument_ids, kombinierte_suchanfrage, benutzer_id, CHUNKS_PRO_DOKUMENT_KOMPLETT
     )
 
     if not ausschnitte:
@@ -278,7 +278,7 @@ def kompletter_check(dokument_ids, preset_id=PRESET_STANDARD):
     return ki_analyse.ki_anfrage(system_text, ausschnitte)
 
 
-def rueckfrage_beantworten(pruefung_ergebnis_text, dokument_ids, frage, verlauf=None):
+def rueckfrage_beantworten(pruefung_ergebnis_text, dokument_ids, benutzer_id, frage, verlauf=None):
     """Beantwortet eine Rückfrage zu einem bereits erstellten Prüfungsergebnis.
 
     Getrennt von `pdf_logik.frage_beantworten` (normaler Chat) und von
@@ -289,6 +289,7 @@ def rueckfrage_beantworten(pruefung_ergebnis_text, dokument_ids, frage, verlauf=
     return ki_analyse.rueckfrage_beantworten(
         pruefung_ergebnis_text,
         dokument_ids,
+        benutzer_id,
         frage,
         verlauf=verlauf,
         kontext_label="Prüfungsergebnis",
