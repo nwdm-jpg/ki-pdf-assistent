@@ -268,7 +268,7 @@ if bereich == BEREICH_START:
             "🛡️",
             "Dokument prüfen",
             "Erkenne wichtige Punkte, Fristen und mögliche Risiken.",
-            "Dokument prüfen",
+            "Dokumenten-\nprüfer",
             key="pruefung",
         ):
             st.session_state.aktiver_bereich = BEREICH_PRUEFUNG
@@ -612,6 +612,7 @@ elif bereich == BEREICH_PRUEFUNG:
                     "Prüfen",
                     key=f"pruefung_start_{kategorie_id}",
                     deaktiviert=not ausgewaehlte_ids,
+                    button_typ="primary",
                 ):
                     _pruefung_starten(
                         kategorie_id,

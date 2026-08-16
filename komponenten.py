@@ -130,29 +130,90 @@ h1, h2, h3 {
    AVENLOQ-Farbverlauf statt einer einfarbigen Füllung - der einzige
    Ort im UI, an dem Buttons den Verlauf tragen (Button-Hierarchie).
    Eine einzige zentrale Regel für alle Primär-Buttons (Startseite,
-   Analyse & Vergleich, aktive Navigation, "Kompletten Check starten")
-   statt Einzelstyling je Seite. font-weight 600 (statt Streamlits
-   Standard 400) macht sie etwas prominenter, ohne die Schriftgröße über
-   die native 16px hinaus zu vergrößern; display:flex + centering ist
-   bereits Streamlits Standardverhalten, wird hier aber explizit
-   festgeschrieben, damit die Zentrierung nicht von künftigen
-   Streamlit-Änderungen abhängt. */
+   Analyse & Vergleich, Dokument-prüfen-Kategorien, "Kompletten
+   Dokumenten-Check starten", aktive Navigation) statt Einzelstyling je
+   Seite.
+
+   WICHTIG: Streamlit rendert das Button-Label nicht direkt im
+   Button-Element - es steckt vier Ebenen tief in einem Absatz
+   (p-Tag) innerhalb von [data-testid="stMarkdownContainer"], und
+   genau dieser Absatz trägt Streamlits eigene Absatz-Schriftgröße
+   (14px), die NICHT von einer font-size-Regel auf dem äußeren
+   Button-Element geerbt/überschrieben wird - daher blieb der
+   Button-Text bei einer reinen button[kind=primary]-Regel klein.
+
+   Der zweite, hartnäckigere Fehler (Text saß sichtbar am oberen statt
+   im mittleren Bereich des Buttons) lag NICHT an fehlendem
+   flex-Centering, sondern an einer echten Selektor-Kollision: die
+   Regel "[class*='st-key-home_karte_'] p { min-height: 5rem }" weiter
+   unten (für die Kartenbeschreibung auf der Startseite) ist ein reiner
+   Nachfahren-Selektor und traf dadurch JEDEN Absatz innerhalb der
+   Karte - auch den Absatz im eigenen Button. Das erzwang eine
+   Mindesthöhe von 80px auf dem Button-Label, in der der Text als
+   Blockelement oben zu sitzen kam. Erst per Playwright nachgemessen
+   (nicht nur vermutet) wurde klar, dass weder align-items/align-self
+   noch eine reine height-Regel das beheben - min-height gewinnt gegen
+   eine kleinere berechnete Höhe. Fix: min-height auf dem Button-Absatz
+   explizit mit !important auf 0 zurücksetzen, zusätzlich zu Höhe und
+   align-self als Absicherung.
+
+   Hinweis für künftige Änderungen an diesem CSS-Block: `_CSS` geht
+   durch `st.html()` (DOMPurify) - Text, der wie ein HTML-Tag aussieht
+   (spitze Klammern um ein Wort, z. B. beim Nennen eines Elementnamens),
+   darf hier auch innerhalb von Kommentaren nicht vorkommen, sonst wird
+   das umgebende Style-Element beschädigt (siehe Git-Historie:
+   "AAVENLOQ"-Bug). Elementnamen in Kommentaren immer ohne spitze
+   Klammern schreiben (z. B. "Style-Element" statt der Tag-Schreibweise). */
 button[kind="primary"],
 [data-testid="stBaseButton-primary"] {
     background: var(--avq-gradient) !important;
     border: none !important;
     color: #FFFFFF !important;
-    font-weight: 600;
-    font-size: 1rem;
     display: flex;
     align-items: center;
     justify-content: center;
+    text-align: center;
+}
+button[kind="primary"] [data-testid="stMarkdownContainer"],
+[data-testid="stBaseButton-primary"] [data-testid="stMarkdownContainer"] {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    width: 100%;
+}
+button[kind="primary"] [data-testid="stMarkdownContainer"] p,
+[data-testid="stBaseButton-primary"] [data-testid="stMarkdownContainer"] p {
+    align-self: center !important;
+    height: auto !important;
+    min-height: 0 !important;
+    font-size: 17px;
+    font-weight: 600;
+    line-height: 1;
+    margin: 0;
     text-align: center;
 }
 button[kind="primary"]:hover,
 [data-testid="stBaseButton-primary"]:hover {
     filter: brightness(1.08);
     color: #FFFFFF !important;
+}
+
+/* Einmalige Ausnahme NUR für den Startseiten-Button "Dokument prüfen"
+   (Karte "pruefung", siehe start_karte-Aufruf in web_app.py): das
+   Label enthält einen echten Zeilenumbruch nach dem Bindestrich
+   ("Dokumenten-\nprüfer"), damit der Umbruch garantiert genau dort
+   erzwungen wird statt dem Browser die Umbruchstelle zu überlassen.
+   Der Absatz übernimmt normalerweise "white-space: normal" (Umbrüche
+   werden zu Leerzeichen), daher hier gezielt auf "pre-line"
+   umgeschaltet, aber nur für diesen einen Button (Selektor über den
+   Button-eigenen Key "home_button_pruefung"), damit kein anderer
+   Button betroffen ist. line-height leicht reduziert, damit beide
+   Zeilen bei 17px Schrift noch innerhalb der unveränderten
+   Button-Höhe (40px) Platz finden. */
+[class*="st-key-home_button_pruefung"] button p {
+    white-space: pre-line !important;
+    line-height: 0.94 !important;
 }
 
 /* Deaktivierter Primär-Button muss trotz der obigen !important-Regel
