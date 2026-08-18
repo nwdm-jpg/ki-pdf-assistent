@@ -111,17 +111,17 @@ def versenden(empfaenger, betreff, text):
 def sende_registrierung_verifizierung(empfaenger, verifizierungs_link):
     return versenden(
         empfaenger,
-        "Bestätige deine E-Mail-Adresse bei AVENLOQ",
-        f"Willkommen bei AVENLOQ!\n\nBitte bestätige deine E-Mail-Adresse:\n{verifizierungs_link}\n",
+        "Bestätige deine E-Mail-Adresse bei Clevoriq",
+        f"Willkommen bei Clevoriq!\n\nBitte bestätige deine E-Mail-Adresse:\n{verifizierungs_link}\n",
     )
 
 
 def sende_email_geaendert(empfaenger, verifizierungs_link):
     return versenden(
         empfaenger,
-        "Deine E-Mail-Adresse bei AVENLOQ wurde geändert",
+        "Deine E-Mail-Adresse bei Clevoriq wurde geändert",
         (
-            "Die E-Mail-Adresse deines AVENLOQ-Kontos wurde geändert.\n\n"
+            "Die E-Mail-Adresse deines Clevoriq-Kontos wurde geändert.\n\n"
             f"Bitte bestätige die neue Adresse:\n{verifizierungs_link}\n\n"
             "Warst du das nicht, wende dich umgehend an den Support."
         ),
@@ -131,9 +131,9 @@ def sende_email_geaendert(empfaenger, verifizierungs_link):
 def sende_passwort_geaendert(empfaenger):
     return versenden(
         empfaenger,
-        "Dein AVENLOQ-Passwort wurde geändert",
+        "Dein Clevoriq-Passwort wurde geändert",
         (
-            "Das Passwort deines AVENLOQ-Kontos wurde soeben geändert.\n\n"
+            "Das Passwort deines Clevoriq-Kontos wurde soeben geändert.\n\n"
             "Warst du das nicht, wende dich umgehend an den Support."
         ),
     )
@@ -142,9 +142,9 @@ def sende_passwort_geaendert(empfaenger):
 def sende_passwort_reset(empfaenger, reset_link):
     return versenden(
         empfaenger,
-        "Passwort zurücksetzen bei AVENLOQ",
+        "Passwort zurücksetzen bei Clevoriq",
         (
-            "Für dein AVENLOQ-Konto wurde ein Passwort-Reset angefordert.\n\n"
+            "Für dein Clevoriq-Konto wurde ein Passwort-Reset angefordert.\n\n"
             f"Link zum Zurücksetzen (zeitlich begrenzt gültig):\n{reset_link}\n\n"
             "Hast du das nicht angefordert, kannst du diese Nachricht ignorieren."
         ),
@@ -154,9 +154,9 @@ def sende_passwort_reset(empfaenger, reset_link):
 def sende_konto_geloescht(empfaenger):
     return versenden(
         empfaenger,
-        "Dein AVENLOQ-Konto wurde gelöscht",
+        "Dein Clevoriq-Konto wurde gelöscht",
         (
-            "Dein AVENLOQ-Konto und alle zugehörigen Daten wurden "
+            "Dein Clevoriq-Konto und alle zugehörigen Daten wurden "
             "unwiderruflich gelöscht."
         ),
     )

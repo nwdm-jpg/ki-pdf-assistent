@@ -3,44 +3,113 @@
 Bündelt Darstellung, die in mehreren Bereichen (Startseite, Analyse &
 Vergleich, Dokument prüfen, ggf. künftige Bereiche) identisch aussehen
 soll - Seitenköpfe, leere Zustände, Ergebniskarten, Rückfragen-Chat,
-Quellenangaben, große Startseiten-Karten, die AVENLOQ-Wortmarke - damit
+Quellenangaben, große Startseiten-Karten, die Clevoriq-Wortmarke - damit
 web_app.py nicht dieselbe Streamlit-Auszeichnung mehrfach dupliziert und
 das Erscheinungsbild der App garantiert konsistent bleibt (ein Ort für
 Layout-/Formatierungs-/Markenentscheidungen statt verstreuter Kopien).
 
 Grundfarben, Radien und die Sidebar-/Content-Aufteilung kommen bewusst
 aus dem nativen Streamlit-Theme (`.streamlit/config.toml`, inkl. der
-AVENLOQ-Markenpalette), nicht aus CSS. Hier steckt nur, was config.toml
-nicht abdecken kann: die AVENLOQ-Design-Tokens (Farbverlauf-Variable,
-Schriftart), der Blue-→-Violet-Farbverlauf für Primär-Buttons/aktive
-Navigation/Highlights, die Wortmarke und wenige strukturelle
-Ergänzungen (z. B. Mindesthöhe der großen Startseiten-Karten).
+Clevoriq-Markenpalette), nicht aus CSS. Hier steckt der Rest des
+Clevoriq-Design-Systems, den config.toml nicht abdecken kann: die
+zentralen Design-Tokens (Farben, Schatten, Radien, Animation-Timing),
+das einheitliche Blau für Primär-Buttons/aktive Navigation, das EINE
+helle Hero-Band für alle Bereichs-Kopfzeilen (`seiten_hero`), das
+moderne Karten-/Hover-System, die Wortmarke und wenige strukturelle
+Ergänzungen (z. B. Mindesthöhe der großen Startseiten-Karten). Der
+Hauptbereich hat bewusst einen reinen weißen Hintergrund ohne
+Verlauf/Deko-Ebene - eine frühere mehrschichtige animierte Mesh-Deko
+wurde zurückgebaut, weil sie der geforderten Design-Einheitlichkeit
+entgegenstand (siehe Kommentare bei den betroffenen Regeln).
 """
+
+import html
 
 import streamlit as st
 
 
-# Zentrale AVENLOQ-Design-Tokens (Farben/Farbverlauf/Schriftart) +
-# strukturelle Ergänzungen (Layoutbreite, Kartengröße, Wortmarke,
-# Button-Hierarchie), die über das native Theme (.streamlit/config.toml)
-# hinausgehen. Der Blue-→-Violet-Farbverlauf ist bewusst auf
-# Primär-Buttons, aktive Navigation und wenige Highlights (Wortmarke,
-# Tagline) beschränkt - normale UI-Elemente bleiben zurückhaltend/neutral.
+# Zentrale Clevoriq-Design-Tokens (Farben/Schatten/Radien/Animation-
+# Timing/Schriftart) + strukturelle Ergänzungen (Layoutbreite,
+# Kartengröße, Wortmarke, Button-Hierarchie), die über das native Theme
+# (.streamlit/config.toml) hinausgehen. EIN einheitliches, kräftiges Blau
+# (`--clv-blue`) trägt alle Primär-Buttons und die aktive Navigation -
+# keine Farbverläufe mehr auf flächigen UI-Elementen (siehe Designrichtung
+# "vereinheitliche das komplette Design" - vorherige Blau-→-Violet-→-Red-
+# Verläufe auf Buttons/Kopfboxen wurden bewusst zurückgebaut, weil sie der
+# geforderten Konsistenz/Ruhe entgegenstanden). `--clv-gradient` und
+# `--clv-gradient-soft` bleiben nur für die (unveränderte) Wortmarke bzw.
+# den Startseiten-Claim erhalten, siehe deren jeweilige Regeln unten.
 _CSS = """
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
 
 :root {
-    --avq-navy: #0D1026;
-    --avq-blue: #2563EB;
-    --avq-violet: #7C3AED;
-    --avq-purple: #A855F7;
-    --avq-lavender: #EDE9FE;
-    --avq-gradient: linear-gradient(135deg, var(--avq-blue) 0%, var(--avq-violet) 100%);
+    --clv-navy: #111827;
+    --clv-blue: #2563EB;
+    --clv-blue-dark: #1D4ED8;
+    --clv-violet: #7C3AED;
+    --clv-red: #E53935;
+    --clv-bg: #FFFFFF;
+    --clv-bg-alt: #F1F5F9;
+    --clv-white: #FFFFFF;
+    --clv-muted: #64748B;
+    --clv-border: rgba(17, 24, 39, 0.09);
+    --clv-border-strong: rgba(17, 24, 39, 0.16);
+    /* Nur noch für die (unveränderte) Wortmarke bzw. deren Icon-Kachel
+       verwendet (siehe .avq-marke-icon/.avq-tagline) - Primär-Buttons und
+       Hero-Icons nutzen jetzt das einheitliche `--clv-blue`. */
+    --clv-gradient: linear-gradient(135deg, var(--clv-blue) 0%, var(--clv-violet) 55%, var(--clv-red) 100%);
+    --clv-gradient-soft: linear-gradient(150deg, #3E63C9 0%, #7C6BC4 45%, #C24B45 100%);
+    --clv-glow-blue: rgba(37, 99, 235, 0.20);
+    --clv-glow-red: rgba(229, 57, 53, 0.17);
+    --clv-radius: 18px;
+    --clv-radius-sm: 12px;
+    --clv-shadow-sm: 0 1px 2px rgba(17, 24, 39, 0.04), 0 1px 3px rgba(17, 24, 39, 0.06);
+    --clv-shadow-md: 0 8px 24px rgba(17, 24, 39, 0.08), 0 2px 6px rgba(17, 24, 39, 0.05);
+    --clv-shadow-lg: 0 16px 40px rgba(17, 24, 39, 0.12), 0 4px 10px rgba(17, 24, 39, 0.06);
+    --clv-transition: 200ms cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 html, body, [class*="css"] {
     font-family: "Inter", "Segoe UI", sans-serif;
+}
+
+/* Hauptbereich: reiner, konsistenter weißer Hintergrund (kein Mesh, kein
+   Verlauf) - siehe Designrichtung "Gesamthintergrund der Anwendung soll
+   komplett weiß sein". Die frühere, mehrschichtige animierte Mesh-/
+   Ring-Deko-Ebene wurde bewusst entfernt: Sie stand der geforderten
+   Einheitlichkeit/Ruhe entgegen. Die Sidebar bleibt bewusst dunkel mit
+   ihrer eigenen, davon unabhängigen dezenten Deko (siehe weiter unten)
+   - das ist etablierter, wiederholt bestätigter Kontrast zur weißen
+   Anwendungsfläche und nicht Teil dieser Vereinheitlichung. */
+[data-testid="stMain"] {
+    background-color: var(--clv-bg);
+}
+
+/* Dezenter, animierter Blau-/Rot-Glow hinter dem Startseiten-Hero
+   (Wortmarke + Claim), siehe hero_glow(). Absolut positioniert relativ
+   zu .block-container (siehe position: relative dort weiter unten);
+   sehr geringe Deckkraft, rein dekorativ (aria-hidden, pointer-events:
+   none), sodass er weder Text verdeckt noch klickbar ist. */
+.clv-hero-glow {
+    position: absolute;
+    top: -1.5rem;
+    left: 50%;
+    transform: translateX(-50%);
+    width: min(54rem, 94vw);
+    height: 22rem;
+    pointer-events: none;
+    z-index: 0;
+    background: radial-gradient(closest-side, var(--clv-glow-blue), rgba(124, 58, 237, 0.09) 45%, var(--clv-glow-red) 72%, transparent 82%);
+}
+@media (prefers-reduced-motion: no-preference) {
+    .clv-hero-glow {
+        animation: clv-hero-pulse 14s ease-in-out infinite;
+    }
+}
+@keyframes clv-hero-pulse {
+    0%, 100% { opacity: 0.75; transform: translateX(-50%) scale(1); }
+    50%      { opacity: 1; transform: translateX(-50%) scale(1.04); }
 }
 
 /* Streamlits fixe Kopfzeile (Deploy-/Menü-Leiste) ist absolut
@@ -50,6 +119,7 @@ html, body, [class*="css"] {
    des Inhalts (insbesondere die große Wortmarke auf der Startseite)
    unter der Kopfzeile und wird von ihr überdeckt/"abgeschnitten". */
 .block-container {
+    position: relative;
     max-width: 1000px;
     padding-top: 4.75rem;
     padding-bottom: 3rem;
@@ -57,19 +127,58 @@ html, body, [class*="css"] {
 [data-testid="stSidebar"] .block-container {
     padding-top: 2rem;
 }
+
+/* Sehr dezentes Raster + zwei ruhige Glows in der dunklen Sidebar -
+   bewusst auf `.block-container` selbst (nicht auf den äußeren
+   `[data-testid="stSidebar"]`-Wrapper) als eigenes `background-image`
+   gesetzt: `.block-container` ist bereits ein reiner Inhalts-Container
+   ohne eigene Positionierungs-/Scroll-Logik, während der äußere
+   Sidebar-Wrapper (fixe Breite, ggf. eigenes Scroll-/Fixed-Verhalten
+   durch Streamlit selbst) NICHT angefasst wird - so bleibt die
+   native Sidebar-Mechanik (Scrollen, Ein-/Ausklappen) unangetastet.
+   Sehr geringe Deckkraft, damit Navigation/Text jederzeit gut lesbar
+   bleiben. */
+[data-testid="stSidebar"] .block-container {
+    background-repeat: repeat, repeat, no-repeat, no-repeat;
+    background-image:
+        repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.035) 0, rgba(255, 255, 255, 0.035) 1px, transparent 1px, transparent 42px),
+        repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.035) 0, rgba(255, 255, 255, 0.035) 1px, transparent 1px, transparent 42px),
+        radial-gradient(20rem 18rem at 100% -8%, rgba(37, 99, 235, 0.16), transparent 65%),
+        radial-gradient(18rem 22rem at -10% 108%, rgba(229, 57, 53, 0.1), transparent 65%);
+}
+@media (prefers-reduced-motion: no-preference) {
+    [data-testid="stSidebar"] .block-container {
+        animation: clv-sidebar-glow-drift 52s ease-in-out infinite alternate;
+    }
+}
+@keyframes clv-sidebar-glow-drift {
+    0%   { background-position: 0 0, 0 0, 0% 0%, 0% 0%; }
+    50%  { background-position: 0 0, 0 0, -2% 3%, 2% -3%; }
+    100% { background-position: 0 0, 0 0, 3% -2%, -3% 2%; }
+}
+@media (max-width: 640px) {
+    [data-testid="stSidebar"] .block-container {
+        animation: none;
+    }
+}
+
 h1, h2, h3 {
     letter-spacing: -0.01em;
 }
 
-/* AVENLOQ-Wortmarke (Icon + Schriftzug + optionaler, dezenter
+/* Clevoriq-Wortmarke (Icon + Schriftzug + optionaler, dezenter
    Produkt-Indikator darunter, z. B. "Documents"), siehe marke_kopf().
    Keine eigene Textfarbe - sie erbt bewusst die Umgebungsfarbe (helle
    Sidebar-Schrift auf Navy vs. dunkle Schrift im hellen Content-Bereich).
-   AVENLOQ ist die dominante Plattform-/Konto-Marke, der Produkt-Name
+   Clevoriq ist die dominante Plattform-/Konto-Marke, der Produkt-Name
    (aktuell nur "Documents") steht bewusst kleiner/zurückhaltender
    darunter statt gleichrangig daneben - siehe CLAUDE.md
-   "Platform & Product Branding". */
+   "Platform & Product Branding". position: relative + z-index sorgen
+   dafür, dass die Wortmarke immer über dem Hero-Glow (siehe
+   .clv-hero-glow) liegt, unabhängig von dessen DOM-Position. */
 .avq-marke {
+    position: relative;
+    z-index: 1;
     display: flex;
     align-items: center;
     gap: 0.6rem;
@@ -83,7 +192,7 @@ h1, h2, h3 {
     width: 2rem;
     height: 2rem;
     border-radius: 0.55rem;
-    background: var(--avq-gradient);
+    background: var(--clv-gradient-soft);
     color: #FFFFFF !important;
     font-weight: 800;
     font-size: 1.05rem;
@@ -97,9 +206,8 @@ h1, h2, h3 {
 }
 .avq-marke-text {
     font-weight: 800;
-    letter-spacing: 0.06em;
+    letter-spacing: 0.02em;
     font-size: 1.15rem;
-    text-transform: uppercase;
     line-height: 1;
 }
 .avq-marke-produkt {
@@ -111,29 +219,95 @@ h1, h2, h3 {
     line-height: 1;
 }
 .avq-marke--gross .avq-marke-icon {
-    width: 3.25rem;
-    height: 3.25rem;
-    border-radius: 0.85rem;
-    font-size: 1.75rem;
+    width: 3.75rem;
+    height: 3.75rem;
+    border-radius: 0.95rem;
+    font-size: 2rem;
 }
 .avq-marke--gross .avq-marke-text {
-    font-size: 2rem;
+    font-size: 2.3rem;
 }
 .avq-marke--gross .avq-marke-produkt {
     font-size: 0.95rem;
 }
 
 /* Tagline auf der Startseite - einer der wenigen bewussten
-   Farbverlauf-Akzente (Highlight), siehe marke_tagline(). */
+   Farbverlauf-Akzente (Highlight), siehe marke_tagline(). Ebenfalls
+   über dem Hero-Glow positioniert (siehe .avq-marke oben). */
 .avq-tagline {
+    position: relative;
+    z-index: 1;
     font-size: 1.35rem;
     font-weight: 600;
     line-height: 1.3;
     margin: 0.9rem 0 0.4rem 0;
-    background: var(--avq-gradient);
+    background: var(--clv-gradient);
     -webkit-background-clip: text;
     background-clip: text;
     color: transparent;
+}
+
+/* Seiten-Hero-Band, siehe seiten_hero() - der einheitliche Kopfbereich
+   oben auf jeder größeren Seite (Chat, Analyse & Vergleich, Dokument
+   prüfen, Bibliothek, Konto & Sicherheit), gefolgt vom gewohnten hellen
+   Inhaltsbereich darunter. Eine einzige, helle Variante für alle Seiten
+   (weißer Hintergrund, feine Border, dezenter Schatten) - eine frühere
+   zusätzliche dunkle Navy-Variante (`.clv-hero-band--dark`) plus eigene
+   animierte Raster-/Glow-Deko-Ebene wurde entfernt, weil das genau die
+   Uneinheitlichkeit erzeugte, die die Designrichtung jetzt ausdrücklich
+   nicht mehr will: alle Kopfboxen sehen jetzt exakt gleich aus (gleicher
+   Hintergrund, gleiche Abstände, Rundungen, Schatten, Typografie,
+   Icon-Darstellung), unabhängig davon, welcher Bereich sie rendert. */
+.clv-hero-band {
+    border-radius: var(--clv-radius);
+    padding: 2.25rem 2rem;
+    margin-bottom: 1.75rem;
+    background: var(--clv-white);
+    border: 1px solid var(--clv-border);
+    box-shadow: var(--clv-shadow-sm);
+}
+.clv-hero-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 1rem;
+    min-width: 0;
+}
+.clv-hero-text {
+    min-width: 0;
+}
+.clv-hero-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    width: 3rem;
+    height: 3rem;
+    border-radius: 0.85rem;
+    background: rgba(37, 99, 235, 0.1);
+    font-size: 1.4rem;
+    line-height: 1;
+}
+.clv-hero-title {
+    margin: 0;
+    font-size: 1.85rem;
+    font-weight: 800;
+    letter-spacing: -0.01em;
+    color: var(--clv-navy);
+    line-height: 1.2;
+}
+.clv-hero-subtitle {
+    margin: 0.4rem 0 0 0;
+    font-size: 0.98rem;
+    color: var(--clv-muted);
+    line-height: 1.45;
+}
+@media (max-width: 640px) {
+    .clv-hero-band {
+        padding: 1.5rem 1.25rem;
+    }
+    .clv-hero-title {
+        font-size: 1.5rem;
+    }
 }
 
 /* Zurückhaltender, professioneller Hinweis-Baustein (z. B. Disclaimer
@@ -142,20 +316,19 @@ h1, h2, h3 {
 .avq-hinweis {
     font-size: 0.85rem;
     color: #52525B;
-    background: var(--avq-lavender);
-    border-left: 3px solid var(--avq-violet);
+    background: var(--clv-bg-alt);
+    border-left: 3px solid var(--clv-blue);
     border-radius: 8px;
     padding: 0.55rem 0.85rem;
     margin: 0.35rem 0 1rem 0;
 }
 
-/* Primär-Buttons (inkl. aktiver Navigation) erhalten den
-   AVENLOQ-Farbverlauf statt einer einfarbigen Füllung - der einzige
-   Ort im UI, an dem Buttons den Verlauf tragen (Button-Hierarchie).
-   Eine einzige zentrale Regel für alle Primär-Buttons (Startseite,
-   Analyse & Vergleich, Dokument-prüfen-Kategorien, "Kompletten
-   Dokumenten-Check starten", aktive Navigation) statt Einzelstyling je
-   Seite.
+/* Primär-Buttons (inkl. aktiver Navigation) erhalten ein einheitliches,
+   kräftiges Blau (kein Farbverlauf mehr - siehe Designrichtung
+   "einheitliches Blau, passend zur Website"). Eine einzige zentrale
+   Regel für alle Primär-Buttons (Startseite, Analyse & Vergleich,
+   Dokument-prüfen-Kategorien, "Kompletten Dokumenten-Check starten",
+   aktive Navigation) statt Einzelstyling je Seite.
 
    WICHTIG: Streamlit rendert das Button-Label nicht direkt im
    Button-Element - es steckt vier Ebenen tief in einem Absatz
@@ -189,13 +362,14 @@ h1, h2, h3 {
    Klammern schreiben (z. B. "Style-Element" statt der Tag-Schreibweise). */
 button[kind="primary"],
 [data-testid="stBaseButton-primary"] {
-    background: var(--avq-gradient) !important;
+    background: var(--clv-blue) !important;
     border: none !important;
     color: #FFFFFF !important;
     display: flex;
     align-items: center;
     justify-content: center;
     text-align: center;
+    transition: background-color var(--clv-transition), transform var(--clv-transition), box-shadow var(--clv-transition);
 }
 button[kind="primary"] [data-testid="stMarkdownContainer"],
 [data-testid="stBaseButton-primary"] [data-testid="stMarkdownContainer"] {
@@ -218,8 +392,159 @@ button[kind="primary"] [data-testid="stMarkdownContainer"] p,
 }
 button[kind="primary"]:hover,
 [data-testid="stBaseButton-primary"]:hover {
-    filter: brightness(1.08);
+    background: var(--clv-blue-dark) !important;
     color: #FFFFFF !important;
+    transform: translateY(-1px);
+    box-shadow: 0 6px 18px rgba(37, 99, 235, 0.24);
+}
+button[kind="primary"]:active,
+[data-testid="stBaseButton-primary"]:active {
+    transform: translateY(0);
+}
+
+/* Sekundär-Buttons im hellen Hauptbereich: dezente, kartenartige Optik
+   (weiß/hellgrau + feine Border) statt der reinen Theme-Vorgabe, mit
+   sanftem Hover (leichte Anhebung + Border-Tönung Richtung Blau) - siehe
+   "Buttons"-Abschnitt der Designrichtung. Bewusst auf den Hauptbereich
+   beschränkt (siehe eigene Sidebar-Regel weiter unten), damit die dunkle
+   Sidebar ihre eigene, dort besser lesbare Sekundär-Optik behält. */
+[data-testid="stMain"] button[kind="secondary"],
+[data-testid="stMain"] [data-testid="stBaseButton-secondary"] {
+    background: var(--clv-white) !important;
+    color: var(--clv-navy) !important;
+    border: 1px solid var(--clv-border-strong) !important;
+    transition: transform var(--clv-transition), box-shadow var(--clv-transition), border-color var(--clv-transition), background var(--clv-transition);
+}
+[data-testid="stMain"] button[kind="secondary"]:hover,
+[data-testid="stMain"] [data-testid="stBaseButton-secondary"]:hover {
+    border-color: var(--clv-blue) !important;
+    background: var(--clv-bg-alt) !important;
+    transform: translateY(-1px);
+    box-shadow: var(--clv-shadow-sm);
+}
+
+/* Sekundär-Buttons in der dunklen Sidebar (u. a. inaktive Navigation,
+   "Neuer Chat", Chat-Liste, "Konto & Sicherheit"/"Abmelden"): dezente
+   Ghost-Optik statt einer hellen Fläche, damit sie auf Navy gut lesbar
+   bleiben - sanfter Hover-Hintergrund statt Farbverlauf/Anhebung. */
+[data-testid="stSidebar"] button[kind="secondary"],
+[data-testid="stSidebar"] [data-testid="stBaseButton-secondary"] {
+    background: rgba(255, 255, 255, 0.04) !important;
+    border: 1px solid rgba(255, 255, 255, 0.08) !important;
+    transition: background var(--clv-transition), border-color var(--clv-transition);
+}
+[data-testid="stSidebar"] button[kind="secondary"]:hover,
+[data-testid="stSidebar"] [data-testid="stBaseButton-secondary"]:hover {
+    background: rgba(255, 255, 255, 0.09) !important;
+    border-color: rgba(37, 99, 235, 0.5) !important;
+}
+
+/* Aktive Navigation (Primär-Button in der Sidebar) - dasselbe
+   einheitliche Blau wie andere Primär-Buttons, aber ohne die
+   Hover-Anhebung (Navigation soll ruhig wirken, nicht "wegspringen"). */
+[data-testid="stSidebar"] button[kind="primary"]:hover,
+[data-testid="stSidebar"] [data-testid="stBaseButton-primary"]:hover {
+    transform: none;
+    box-shadow: 0 4px 14px rgba(37, 99, 235, 0.28);
+}
+
+/* Dezente, moderne Ladezustands-Optik (st.spinner) - keine hektische
+   native Optik, sondern ein sanfter Blau-Glow um das ohnehin native
+   Spinner-Icon. Rein visuell, keine funktionale Änderung. */
+[data-testid="stSpinner"] svg {
+    color: var(--clv-blue);
+    filter: drop-shadow(0 0 5px rgba(37, 99, 235, 0.35));
+}
+
+/* Moderne Formulareingaben (Textfelder, Auswahlfelder, Datum, Zahl,
+   Chateingabe) - dezente Border statt der nativen Theme-Vorgabe, klarer
+   Blau-Fokuszustand mit weichem Glow, einheitlicher Radius. Bewusst NUR
+   auf den Hauptbereich beschränkt (Formulare in der Sidebar - aktuell
+   keine - blieben sonst auf dunklem Grund unlesbar hell/weiß). */
+[data-testid="stMain"] [data-testid="stTextInput"] input,
+[data-testid="stMain"] [data-testid="stTextArea"] textarea,
+[data-testid="stMain"] [data-testid="stDateInput"] input,
+[data-testid="stMain"] [data-testid="stNumberInput"] input,
+[data-testid="stMain"] [data-baseweb="select"] > div {
+    border-radius: var(--clv-radius-sm) !important;
+    border: 1px solid var(--clv-border-strong) !important;
+    background: var(--clv-white) !important;
+    transition: border-color var(--clv-transition), box-shadow var(--clv-transition);
+}
+[data-testid="stMain"] [data-testid="stTextInput"] input:focus,
+[data-testid="stMain"] [data-testid="stTextArea"] textarea:focus,
+[data-testid="stMain"] [data-testid="stDateInput"] input:focus,
+[data-testid="stMain"] [data-testid="stNumberInput"] input:focus,
+[data-testid="stMain"] [data-baseweb="select"]:focus-within > div {
+    border-color: var(--clv-blue) !important;
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.14) !important;
+}
+[data-testid="stMain"] [data-testid="stChatInput"] {
+    border-radius: var(--clv-radius) !important;
+    border: 1px solid var(--clv-border-strong) !important;
+    background: var(--clv-white) !important;
+    transition: border-color var(--clv-transition), box-shadow var(--clv-transition);
+}
+[data-testid="stMain"] [data-testid="stChatInput"]:focus-within {
+    border-color: var(--clv-blue) !important;
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.14) !important;
+}
+
+/* Chat-Bubbles: eigene, hochwertigere Kartenoptik statt der schlichten
+   Theme-Vorgabe - Nutzerfragen dezent blau getönt, KI-Antworten neutral
+   weiß, damit die Rollen auf einen Blick erkennbar bleiben, ohne bunt zu
+   wirken. `:has()` selektiert über die Avatar-Kindelemente, die
+   Streamlit je Rolle unterschiedlich rendert (siehe
+   `stChatMessageAvatarUser`/`stChatMessageAvatarAssistant`). */
+[data-testid="stChatMessage"] {
+    border-radius: var(--clv-radius) !important;
+    border: 1px solid var(--clv-border);
+    box-shadow: var(--clv-shadow-sm);
+    margin-bottom: 0.6rem;
+}
+[data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]) {
+    background: rgba(37, 99, 235, 0.04);
+    border-color: rgba(37, 99, 235, 0.14);
+}
+[data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarAssistant"]) {
+    background: var(--clv-white);
+}
+
+/* Quellenangabe (siehe quellen_hinweis()) als kleiner, hochwertiger
+   "Chip" statt einer reinen Fließtext-Caption. */
+[data-testid="stMain"] [data-testid="stChatMessage"] [data-testid="stCaptionContainer"] {
+    display: inline-block;
+    margin-top: 0.35rem;
+    padding: 0.2rem 0.65rem;
+    border-radius: 999px;
+    background: var(--clv-bg-alt);
+    border: 1px solid var(--clv-border);
+}
+
+/* Einheitliches, modernes Kartensystem für alle umrandeten Container
+   (Startseite, Dokumentenbibliothek, Analyse & Vergleich, Dokument
+   prüfen, Konto & Sicherheit, Login/Register) - weißer Hintergrund
+   (bereits über das native Theme), größerer Radius, dezenter Schatten
+   und ein sehr kurzes, ruhiges Erscheinen/Hover statt einer stark
+   springenden Animation. Bewusst NUR auf den Hauptbereich beschränkt. */
+[data-testid="stMain"] [data-testid="stVerticalBlockBorderWrapper"] {
+    border-radius: var(--clv-radius) !important;
+    box-shadow: var(--clv-shadow-sm);
+    transition: transform var(--clv-transition), box-shadow var(--clv-transition), border-color var(--clv-transition);
+}
+[data-testid="stMain"] [data-testid="stVerticalBlockBorderWrapper"]:hover {
+    transform: translateY(-2px);
+    box-shadow: var(--clv-shadow-md);
+    border-color: var(--clv-border-strong) !important;
+}
+@media (prefers-reduced-motion: no-preference) {
+    [data-testid="stMain"] [data-testid="stVerticalBlockBorderWrapper"] {
+        animation: clv-fade-in 240ms ease-out;
+    }
+}
+@keyframes clv-fade-in {
+    from { opacity: 0; transform: translateY(6px); }
+    to   { opacity: 1; transform: translateY(0); }
 }
 
 /* Einmalige Ausnahme NUR für den Startseiten-Button "Dokument prüfen"
@@ -312,31 +637,73 @@ button[kind="primary"]:disabled,
     margin-top: auto;
     padding-top: 0.75rem;
 }
+/* Dezenter, alternierender Blau-/Rot-Glow beim Hover der vier großen
+   Startseiten-Karten (siehe Designrichtung "Border/Glow darf leicht
+   blau oder rot reagieren") - ergänzt die generelle Karten-Hover-Regel
+   oben um eine kartenspezifische Akzentfarbe statt sie zu ersetzen. */
+[class*="st-key-home_karte_"]:hover {
+    border-color: rgba(37, 99, 235, 0.35) !important;
+    box-shadow: var(--clv-shadow-md), 0 0 0 1px rgba(37, 99, 235, 0.06);
+}
+[class*="st-key-home_karte_analyse"]:hover,
+[class*="st-key-home_karte_pruefung"]:hover {
+    border-color: rgba(229, 57, 53, 0.32) !important;
+    box-shadow: var(--clv-shadow-md), 0 0 0 1px rgba(229, 57, 53, 0.06);
+}
 
 /* Kompakte Aktions-Karten (Dokument prüfen / Analyse & Vergleich), siehe
-   modus_karte(). Titel/Beschreibung reservieren eine nachgemessene
-   Mindesthöhe für den jeweils längsten real vorkommenden Umbruch (Titel
-   zweizeilig, Beschreibung bis zu dreizeilig bei der schmaleren
-   Analyse-Kartenbreite) - dadurch werden alle Karten einer Gruppe exakt
-   gleich hoch statt nur ungefähr. Die vierte Zeile (Hinweistext bei
-   deaktiviertem Button) wird von modus_karte() IMMER gerendert (als
-   unsichtbarer Platzhalter, wenn kein Hinweis nötig ist), damit
-   Karten mit und ohne Hinweistext nicht unterschiedlich hoch werden,
-   z. B. wenn in Analyse & Vergleich je nach Dokumentauswahl nur ein
-   Teil der Karten deaktiviert ist. margin-top:auto auf dem Button
+   modus_karte(). Kind-Reihenfolge (per :nth-child, daher genau in dieser
+   Reihenfolge): (1) farbige Icon-Kachel, (2) Titel, (3) Beschreibung,
+   (4) Button, (5) Hinweiszeile. Titel/Beschreibung reservieren eine
+   nachgemessene Mindesthöhe für den jeweils längsten real vorkommenden
+   Umbruch (Titel zweizeilig, Beschreibung bis zu dreizeilig bei der
+   schmaleren Analyse-Kartenbreite) - dadurch werden alle Karten einer
+   Gruppe exakt gleich hoch statt nur ungefähr. Die fünfte Zeile
+   (Hinweistext bei deaktiviertem Button) wird von modus_karte() IMMER
+   gerendert (als unsichtbarer Platzhalter, wenn kein Hinweis nötig ist),
+   damit Karten mit und ohne Hinweistext nicht unterschiedlich hoch
+   werden, z. B. wenn in Analyse & Vergleich je nach Dokumentauswahl nur
+   ein Teil der Karten deaktiviert ist. margin-top:auto auf dem Button
    schiebt ihn in jeder Karte an denselben unteren Rand. */
-[class*="st-key-modus_karte_"] > [data-testid="stElementContainer"]:first-child {
+[class*="st-key-modus_karte_"] > [data-testid="stElementContainer"]:nth-child(2) {
     min-height: 3.25rem;
 }
-[class*="st-key-modus_karte_"] > [data-testid="stElementContainer"]:nth-child(2) {
+[class*="st-key-modus_karte_"] > [data-testid="stElementContainer"]:nth-child(3) {
     min-height: 4.3rem;
 }
 [class*="st-key-modus_karte_"] > [data-testid="stElementContainer"]:has(.stButton) {
     margin-top: auto;
     padding-top: 0.5rem;
 }
-[class*="st-key-modus_karte_"] > [data-testid="stElementContainer"]:nth-child(4) {
+[class*="st-key-modus_karte_"] > [data-testid="stElementContainer"]:nth-child(5) {
     min-height: 2.8rem;
+}
+
+/* Kleine, farbige Icon-Kachel für Karten (aktuell modus_karte()) -
+   alternierend Blau/Violett/Rot statt eines einzelnen Markenverlaufs je
+   Karte (siehe Designrichtung "Farbliche Icons/Akzente alternierend").
+   Reiner Tönungshintergrund (12 % Deckkraft der jeweiligen Markenfarbe),
+   kein Farbverlauf - das Emoji-Icon selbst trägt bereits seine eigene
+   Farbe. */
+.clv-icon-chip {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 2.5rem;
+    height: 2.5rem;
+    border-radius: 0.7rem;
+    font-size: 1.15rem;
+    line-height: 1;
+    margin-bottom: 0.5rem;
+}
+.clv-icon-chip--blau {
+    background: rgba(37, 99, 235, 0.12);
+}
+.clv-icon-chip--violett {
+    background: rgba(124, 58, 237, 0.12);
+}
+.clv-icon-chip--rot {
+    background: rgba(229, 57, 53, 0.12);
 }
 
 /* Dokumentenbibliothek-Karten: Titel (Dateiname) reserviert zweizeilige
@@ -418,9 +785,9 @@ def css_einbinden():
     st.html(_CSS)
 
 
-# AVENLOQ ist die zentrale Plattform-/Konto-Marke; das aktuelle Produkt
-# ("Documents") ist eines von künftig mehreren AVENLOQ-Produkten auf
-# demselben AVENLOQ-Konto (siehe CLAUDE.md "Platform & Product
+# Clevoriq ist die zentrale Plattform-/Konto-Marke; das aktuelle Produkt
+# ("Documents") ist eines von künftig mehreren Clevoriq-Produkten auf
+# demselben Clevoriq-Konto (siehe CLAUDE.md "Platform & Product
 # Branding") - als Modul-Konstante statt eines in marke_kopf()
 # hartkodierten Strings, damit ein künftiges zweites Produkt (z. B.
 # "Invoice"/"Vault") seinen eigenen Produkt-Namen einfach über den
@@ -431,18 +798,25 @@ PRODUKT_NAME = "Documents"
 
 
 def marke_kopf(gross=False, produkt=PRODUKT_NAME):
-    """Rendert die AVENLOQ-Wortmarke (Farbverlauf-Icon + Schriftzug),
+    """Rendert die Clevoriq-Wortmarke (Farbverlauf-Icon + Schriftzug),
     mit einem optionalen, dezenten Produkt-Indikator (z. B. "Documents")
-    kleiner darunter - AVENLOQ bleibt visuell die dominante Marke, das
+    kleiner darunter - Clevoriq bleibt visuell die dominante Marke, das
     Produkt steht sichtbar, aber deutlich zurückhaltender (siehe
     `.avq-marke-produkt` in `_CSS`). `produkt=None` blendet die Zeile
     aus (z. B. für einen künftigen Kontext ohne Produktbezug); der
-    Parameter existiert bewusst, damit ein späteres zweites AVENLOQ-
+    Parameter existiert bewusst, damit ein späteres zweites Clevoriq-
     Produkt dieselbe Funktion mit einem eigenen Namen aufrufen kann,
     statt eine eigene Wortmarken-Komponente zu bauen.
 
+    Trägt `translate="no"` + die Klasse "notranslate" (von Chrome/Google
+    Translate ausgewertet), damit ein aktives Seiten-Übersetzungs-Tool im
+    Browser die Markennamen "Clevoriq"/"Documents" nicht als normale
+    englische/erkennbare Wörter fehlübersetzt (z. B. "Documents" ->
+    "Unterlagen") - reine Markenschutz-Maßnahme, kein Sprachwechsel der
+    übrigen (bewusst deutschsprachigen) Oberfläche.
+
     Das Icon ist bewusst ein reines CSS-/Text-Icon (Farbverlauf-Kachel +
-    "A", siehe `.avq-marke-icon` in `_CSS`) statt des inline eingebetteten
+    "C", siehe `.avq-marke-icon` in `_CSS`) statt des inline eingebetteten
     `assets/logo_icon.svg`: `st.html` sanitisiert seinen Inhalt mit
     DOMPurify, das SVG-Elemente entfernt, wodurch das Icon unsichtbar
     bliebe. Die Wortmarke erbt ihre Textfarbe bewusst von der Umgebung
@@ -451,15 +825,17 @@ def marke_kopf(gross=False, produkt=PRODUKT_NAME):
     vorbereitete Quell-Assets bestehen (z. B. für ein späteres Favicon
     oder eine gerasterte Grafik) - ein endgültiges Logo-Asset kann diese
     Funktion später ersetzen, ohne dass sich ihre Aufrufstellen ändern
-    müssen.
+    müssen. CSS-Klassennamen (Präfix "avq-") bleiben technisch
+    unverändert (reines Implementierungsdetail ohne sichtbaren
+    Markenbezug), um das Diff beim Rebranding klein zu halten.
     """
     klasse = "avq-marke avq-marke--gross" if gross else "avq-marke"
     produkt_html = f'<span class="avq-marke-produkt">{produkt}</span>' if produkt else ""
     st.html(
-        f'<div class="{klasse}">'
-        '<span class="avq-marke-icon">A</span>'
+        f'<div class="{klasse} notranslate" translate="no">'
+        '<span class="avq-marke-icon">C</span>'
         '<span class="avq-marke-wortmarke">'
-        '<span class="avq-marke-text">AVENLOQ</span>'
+        '<span class="avq-marke-text">Clevoriq</span>'
         f"{produkt_html}"
         "</span>"
         "</div>"
@@ -467,10 +843,59 @@ def marke_kopf(gross=False, produkt=PRODUKT_NAME):
 
 
 def marke_tagline():
-    """Rendert den AVENLOQ-Claim als Farbverlauf-Highlight (Startseiten-Hero)."""
+    """Rendert den Clevoriq-Claim als Farbverlauf-Highlight (Startseiten-Hero)."""
     st.html(
         '<p class="avq-tagline">Dokumente verstehen.<br>'
         "Entscheidungen vereinfachen.</p>"
+    )
+
+
+def hero_glow():
+    """Rendert einen sehr dezenten, animierten Blau-/Rot-Glow (siehe
+    `.clv-hero-glow` in `_CSS`) hinter dem Startseiten-Hero.
+
+    Rein dekorativ (aria-hidden, pointer-events: none in der CSS-Regel) -
+    beeinflusst weder Layout noch Funktion, nur die Optik direkt hinter
+    `marke_kopf(gross=True)` + `marke_tagline()` auf der Startseite.
+    """
+    st.html('<div class="clv-hero-glow" aria-hidden="true"></div>')
+
+
+def seiten_hero(icon, titel, untertitel=None):
+    """Rendert das Hero-Band am Kopf einer größeren Seite (siehe
+    `.clv-hero-band` in `_CSS`) - der EINE einheitliche Kopfbereich
+    (Icon-Kachel, große Headline, Untertitel auf weißem Grund), gefolgt
+    vom gewohnten hellen Inhaltsbereich darunter. Wird von Chat, Analyse
+    & Vergleich, Dokument prüfen, Bibliothek und Konto & Sicherheit
+    gleichermaßen genutzt, damit alle Bereichs-Kopfboxen exakt gleich
+    aussehen (siehe Designrichtung "vereinheitliche das komplette
+    Design"). Es gibt bewusst keine zweite (z. B. dunkle) Variante mehr -
+    genau das erzeugte zuvor die unerwünschte Uneinheitlichkeit.
+
+    `titel`/`untertitel` werden IMMER über `html.escape` eingebettet,
+    obwohl die meisten Aufrufer nur feste, im Code definierte Strings
+    übergeben - eine Ausnahme ist der Chat-Bereich, dessen Titel aus der
+    ersten Nutzerfrage abgeleitet wird (`speicher._kurztitel_erzeugen`)
+    und damit Nutzereingabe ist. Da `st.html()` anders als `st.title()`/
+    `st.caption()` NICHT automatisch escaped, wäre ein ungeschützter
+    Aufruf hier eine echte HTML-Injection-Lücke - deshalb pauschal für
+    jeden Aufrufer escapen statt sich auf "ist doch nur ein fester
+    String" zu verlassen.
+    """
+    icon_span = f'<span class="clv-hero-icon">{html.escape(icon)}</span>' if icon else ""
+    untertitel_p = (
+        f'<p class="clv-hero-subtitle">{html.escape(untertitel)}</p>' if untertitel else ""
+    )
+    st.html(
+        '<div class="clv-hero-band">'
+        '<div class="clv-hero-row">'
+        f"{icon_span}"
+        '<div class="clv-hero-text">'
+        f'<h2 class="clv-hero-title">{html.escape(titel)}</h2>'
+        f"{untertitel_p}"
+        "</div>"
+        "</div>"
+        "</div>"
     )
 
 
@@ -503,7 +928,7 @@ def quellen_hinweis(quellenhinweis):
         st.caption(quellenhinweis)
 
 
-def modus_karte(icon, titel, beschreibung, button_label, key, deaktiviert=False, deaktiviert_hinweis=None, button_typ="secondary"):
+def modus_karte(icon, titel, beschreibung, button_label, key, deaktiviert=False, deaktiviert_hinweis=None, button_typ="secondary", akzent="blau"):
     """Kompakte Aktions-Karte (z. B. eine Analyse-/Prüfkategorie).
 
     Trägt einen `st-key-modus_karte_*`-Hook (siehe `_CSS`), damit Titel
@@ -514,9 +939,18 @@ def modus_karte(icon, titel, beschreibung, button_label, key, deaktiviert=False,
     auch von Analyse & Vergleich genutzt, damit beide Kartengruppen
     automatisch konsistent bleiben.
 
+    `akzent` ("blau"/"violett"/"rot") färbt die kleine Icon-Kachel über
+    dem Titel (siehe `.clv-icon-chip` in `_CSS`) - Aufrufer alternieren
+    das üblicherweise pro Karte (siehe Designrichtung "Farbliche
+    Icons/Akzente alternierend"). Sie ist bewusst das ERSTE Kind im
+    Container: die `:nth-child`-Regeln in `_CSS`, die Titel/Beschreibung/
+    Hinweiszeile ausrichten, zählen ab dieser Kachel - wer hier ein
+    weiteres Element vor Titel/Beschreibung ergänzt, muss auch die
+    `:nth-child`-Indizes dort anpassen.
+
     `button_typ` steuert nur die Button-Optik (siehe Streamlits eigenes
     `type=`) - Standard bleibt "secondary" (Dokument prüfen, unverändert),
-    Analyse & Vergleich übergibt "primary" für den AVENLOQ-Farbverlauf.
+    Analyse & Vergleich übergibt "primary" für den Clevoriq-Farbverlauf.
     Die zentrale `button[kind="primary"]`-Regel in `_CSS` sorgt dafür,
     dass ein deaktivierter Primär-Button trotzdem klar deaktiviert
     aussieht statt fälschlich aktiv zu wirken.
@@ -524,7 +958,8 @@ def modus_karte(icon, titel, beschreibung, button_label, key, deaktiviert=False,
     Gibt True zurück, wenn der Button in diesem Lauf geklickt wurde.
     """
     with st.container(border=True, key=f"modus_karte_{key}"):
-        st.markdown(f"**{icon} {titel}**")
+        st.html(f'<span class="clv-icon-chip clv-icon-chip--{akzent}">{html.escape(icon)}</span>')
+        st.markdown(f"**{titel}**")
         st.caption(beschreibung)
 
         geklickt = st.button(

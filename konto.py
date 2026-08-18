@@ -7,7 +7,7 @@ ausschließlich den `benutzer_id` der angemeldeten Sitzung (von
 Wert) und delegiert jede eigentliche Prüfung/Änderung an `speicher.py` -
 dieselbe Schichtentrennung wie im Rest der App (siehe `speicher.py`s
 Prinzip der strikten Datentrennung). Wiederverwendet bewusst dieselben
-AVENLOQ-Bausteine wie die übrigen Bereiche (`komponenten.seiten_kopf`,
+Clevoriq-Bausteine wie die übrigen Bereiche (`komponenten.seiten_kopf`,
 `st.form_submit_button(type="primary")`, `komponenten.hinweis_dezent`,
 `st.container(border=True)`) - keine eigene Optik.
 """
@@ -191,7 +191,7 @@ def _export_abschnitt(benutzer_id):
     st.download_button(
         "Meine Daten exportieren",
         data=zip_bytes,
-        file_name="AVENLOQ-Datenexport.zip",
+        file_name="Clevoriq-Datenexport.zip",
         mime="application/zip",
         key="konto_export_button",
     )
@@ -243,9 +243,10 @@ def _loeschen_abschnitt(benutzer_id, konto):
 
 def seite(benutzer_id):
     """Rendert den kompletten Bereich "⚙️ Konto & Sicherheit"."""
-    komponenten.seiten_kopf(
-        benutzer.BEREICH_KONTO,
-        "Verwalte dein AVENLOQ-Konto und deine Sicherheitseinstellungen.",
+    komponenten.seiten_hero(
+        "⚙",
+        "Konto & Sicherheit",
+        "Verwalte dein Clevoriq-Konto und deine Sicherheitseinstellungen.",
     )
 
     konto = speicher.benutzer_konto_daten(benutzer_id)

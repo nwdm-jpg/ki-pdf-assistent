@@ -1,17 +1,19 @@
-# Design-System der AVENLOQ-App: helle, klare Arbeitsflaeche (Content)
-# kombiniert mit einer dunklen Navy-Sidebar (Navigation) - die
-# Markenpalette (Dark Navy, Blue -> Violet) wird ueber Streamlits native
-# Theming-Optionen gesetzt, nicht per CSS-Override. Der Blue -> Violet
-# Farbverlauf fuer Primaerbuttons/aktive Navigation kommt aus der
-# zentralen CSS-Ergaenzung in komponenten.py (dort auch die wenigen
-# strukturellen Ergaenzungen, die config.toml nicht abdecken kann).
+# Design-System der Clevoriq-App: helle, klare Arbeitsflaeche (Content,
+# White-first) kombiniert mit einer dunklen Navy-Sidebar (Navigation) -
+# die Markenpalette (Primaerblau, kraeftiges Rot, dunkler Navy-Text,
+# helle Hintergrundflaechen) wird ueber Streamlits native Theming-
+# Optionen gesetzt, nicht per CSS-Override. Der Blue -> Violet -> Red
+# Farbverlauf fuer Primaerbuttons/aktive Navigation/Highlights sowie der
+# dezente animierte Mesh-Hintergrund kommen aus der zentralen
+# CSS-Ergaenzung in komponenten.py (dort auch die wenigen strukturellen
+# Ergaenzungen, die config.toml nicht abdecken kann).
 [theme]
 base = "light"
 primaryColor = "#2563EB"
 backgroundColor = "#FFFFFF"
-secondaryBackgroundColor = "#F6F4FE"
-textColor = "#0D1026"
-linkColor = "#7C3AED"
+secondaryBackgroundColor = "#F1F5F9"
+textColor = "#111827"
+linkColor = "#2563EB"
 font = "sans-serif"
 baseRadius = "large"
 buttonRadius = "large"
@@ -19,8 +21,8 @@ showWidgetBorder = true
 showSidebarBorder = true
 
 [theme.sidebar]
-backgroundColor = "#0D1026"
-secondaryBackgroundColor = "#171B3D"
-textColor = "#EDE9FE"
-primaryColor = "#7C3AED"
-borderColor = "#262B52"
+backgroundColor = "#0B1120"
+secondaryBackgroundColor = "#151D33"
+textColor = "#E2E8F0"
+primaryColor = "#2563EB"
+borderColor = "#1E293B"

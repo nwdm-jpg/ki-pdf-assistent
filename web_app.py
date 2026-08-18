@@ -31,8 +31,8 @@ BEREICH_KONTO = benutzer.BEREICH_KONTO
 
 
 st.set_page_config(
-    page_title="AVENLOQ Documents",
-    page_icon="🟣",
+    page_title="Clevoriq Documents",
+    page_icon="🔷",
     layout="wide",
 )
 
@@ -44,7 +44,7 @@ speicher.datenbank_initialisieren()
 
 # Authentifizierungs-Schranke: Solange niemand angemeldet ist, wird
 # ausschließlich die Anmelde-/Registrierungsseite gerendert und der
-# Skriptlauf danach per st.stop() beendet - die normale AVENLOQ-
+# Skriptlauf danach per st.stop() beendet - die normale Clevoriq-
 # Navigation/-Oberfläche (inkl. Sidebar) wird dafür gar nicht erst
 # aufgebaut. `benutzer_id` ist ab hier für den Rest des Laufs bekannt
 # und wird an jede Speicher-/Analyse-/Prüfungsfunktion durchgereicht,
@@ -251,6 +251,7 @@ with st.sidebar:
 
 
 if bereich == BEREICH_START:
+    komponenten.hero_glow()
     komponenten.marke_kopf(gross=True)
     komponenten.marke_tagline()
     st.caption(
@@ -338,7 +339,11 @@ elif bereich == BEREICH_CHAT:
         alle_dokumente[i] for i in aktueller_chat["dokument_ids"] if i in alle_dokumente
     ]
 
-    komponenten.seiten_kopf(aktueller_chat["titel"])
+    komponenten.seiten_hero(
+        "💬",
+        aktueller_chat["titel"],
+        "Stelle Fragen zu deinen aktiven Dokumenten und erhalte Antworten mit Quellenangaben.",
+    )
 
     if not alle_dokumente:
         komponenten.leerer_zustand("Füge zuerst ein Dokument zu deiner Dokumentenbibliothek hinzu.")
@@ -427,8 +432,9 @@ elif bereich == BEREICH_CHAT:
 
 
 elif bereich == BEREICH_ANALYSE:
-    komponenten.seiten_kopf(
-        BEREICH_ANALYSE,
+    komponenten.seiten_hero(
+        "🔍",
+        "Analyse & Vergleich",
         "Fasse Dokumente zusammen, vergleiche Inhalte und finde wichtige Fristen.",
     )
 
@@ -492,7 +498,12 @@ elif bereich == BEREICH_ANALYSE:
         if "analyse_ergebnis" not in st.session_state:
             st.session_state.analyse_ergebnis = None
 
-        for spalte, aktion in zip(spalten, AKTIONEN):
+        # Alterniert die drei Markenakzentfarben über die Kartenreihe
+        # (siehe komponenten.modus_karte's `akzent`) statt jede Karte in
+        # derselben Farbe zu zeigen.
+        AKZENTE = ["blau", "violett", "rot"]
+
+        for index, (spalte, aktion) in enumerate(zip(spalten, AKTIONEN)):
             with spalte:
                 zu_wenige = len(ausgewaehlte_ids) < aktion["mindestens"]
                 hinweis = None
@@ -512,6 +523,7 @@ elif bereich == BEREICH_ANALYSE:
                     deaktiviert=zu_wenige,
                     deaktiviert_hinweis=hinweis,
                     button_typ="primary",
+                    akzent=AKZENTE[index % len(AKZENTE)],
                 ):
                     try:
                         with st.spinner(f"{aktion['titel']} wird erstellt..."):
@@ -569,7 +581,8 @@ elif bereich == BEREICH_ANALYSE:
 
 
 elif bereich == BEREICH_PRUEFUNG:
-    komponenten.seiten_kopf(
+    komponenten.seiten_hero(
+        "🛡️",
         "Dokument prüfen",
         "Lass wichtige Stellen, Risiken, Pflichten und Fristen automatisch prüfen.",
     )
@@ -632,6 +645,11 @@ elif bereich == BEREICH_PRUEFUNG:
 
         kategorie_spalten = st.columns(3)
 
+        # Alterniert die drei Markenakzentfarben über die Kategorie-Karten
+        # (siehe komponenten.modus_karte's `akzent`) statt jede Karte in
+        # derselben Farbe zu zeigen.
+        AKZENTE = ["blau", "violett", "rot"]
+
         for index, kategorie_id in enumerate(pruefung.KATEGORIEN):
             kategorie = pruefung.KATEGORIEN[kategorie_id]
 
@@ -644,6 +662,7 @@ elif bereich == BEREICH_PRUEFUNG:
                     key=f"pruefung_start_{kategorie_id}",
                     deaktiviert=not ausgewaehlte_ids,
                     button_typ="primary",
+                    akzent=AKZENTE[index % len(AKZENTE)],
                 ):
                     _pruefung_starten(
                         kategorie_id,
@@ -697,8 +716,9 @@ elif bereich == BEREICH_KONTO:
 
 
 else:  # BEREICH_BIBLIOTHEK
-    komponenten.seiten_kopf(
-        BEREICH_BIBLIOTHEK,
+    komponenten.seiten_hero(
+        "📚",
+        "Dokumentenbibliothek",
         "Alle deine Dokumente an einem Ort.",
     )
 

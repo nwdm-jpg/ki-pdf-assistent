@@ -217,5 +217,5 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# Lokale Dokumentbibliothek / Chat-Datenbank (AVENLOQ)
+# Lokale Dokumentbibliothek / Chat-Datenbank (Clevoriq)
 app_daten/

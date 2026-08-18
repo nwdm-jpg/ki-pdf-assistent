@@ -16,7 +16,7 @@ sauber ergänzt werden, ohne an diesem Modul grundlegend etwas ändern zu
 müssen.
 
 Wiederverwendet für die Login-/Registrierungsseite bewusst dieselben
-Bausteine wie der Rest von AVENLOQ (`komponenten.marke_kopf`,
+Bausteine wie der Rest von Clevoriq (`komponenten.marke_kopf`,
 `komponenten.marke_tagline`, `st.form_submit_button(type="primary")` für
 den Farbverlauf-Button, `st.container(border=True)` für die Karte) -
 keine eigene Farb-/Typografie-Definition, damit die Optik automatisch
@@ -173,7 +173,7 @@ def _registrieren(benutzername, email, passwort, passwort_wiederholen):
 
 def _login_formular():
     st.markdown("### Willkommen zurück")
-    st.caption("Mit deinem AVENLOQ-Konto anmelden.")
+    st.caption("Mit deinem Clevoriq-Konto anmelden.")
 
     with st.form("login_formular"):
         login_wert = st.text_input("E-Mail oder Benutzername")
@@ -199,7 +199,7 @@ def _login_formular():
 
 def _register_formular():
     st.markdown("### Konto erstellen")
-    st.caption("Lege dein AVENLOQ-Konto an.")
+    st.caption("Lege dein Clevoriq-Konto an.")
 
     with st.form("register_formular"):
         benutzername = st.text_input("Benutzername")
@@ -229,7 +229,7 @@ def authentifizierung_anzeigen():
 
     Wird nur aufgerufen, solange niemand angemeldet ist - `web_app.py`
     beendet den Skriptlauf danach per `st.stop()`, sodass die normale
-    AVENLOQ-Navigation/-Oberfläche gar nicht erst gerendert wird.
+    Clevoriq-Navigation/-Oberfläche gar nicht erst gerendert wird.
     """
     spalte_links, spalte_mitte, spalte_rechts = st.columns([1, 1.3, 1])
 

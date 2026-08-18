@@ -33,7 +33,7 @@ def _sicherer_zip_dateiname(dateiname, dokument_id):
     `PureWindowsPath(...).name` entfernt sowohl "/"- als auch
     "\\"-Pfadsegmente sowie einen eventuellen Laufwerksbuchstaben und
     liefert nur die letzte Pfadkomponente - unabhängig davon, auf welchem
-    Betriebssystem AVENLOQ selbst läuft. Ein Original-Dateiname, der
+    Betriebssystem Clevoriq selbst läuft. Ein Original-Dateiname, der
     NUR aus Pfadtrennzeichen oder Punkten bestand (z. B. "..") bekommt
     einen Fallback über die Dokument-ID: `PurePath.name` liefert für
     einen reinen ".."-Namen nämlich unverändert ".." zurück (es wird kein
@@ -50,7 +50,7 @@ def zip_erstellen(benutzer_id):
     """Baut den vollständigen Datenexport dieses Benutzers als ZIP-Bytes.
 
     Struktur:
-        AVENLOQ-Datenexport/
+        Clevoriq-Datenexport/
             konto.json
             dokumente.json
             chats.json
@@ -104,7 +104,7 @@ def zip_erstellen(benutzer_id):
             )
 
     puffer = io.BytesIO()
-    basis = "AVENLOQ-Datenexport"
+    basis = "Clevoriq-Datenexport"
 
     with zipfile.ZipFile(puffer, "w", zipfile.ZIP_DEFLATED) as zip_datei:
         zip_datei.writestr(f"{basis}/konto.json", json.dumps(konto, ensure_ascii=False, indent=2))

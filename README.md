@@ -1,4 +1,4 @@
-# AVENLOQ
+# Clevoriq
 
 Dokumente verstehen. Entscheidungen vereinfachen.
 
