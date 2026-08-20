@@ -18,6 +18,8 @@ import benutzer
 import datenexport
 import email_versand
 import komponenten
+import ratenbegrenzung
+import sicherheitslog
 import speicher
 
 
@@ -74,25 +76,24 @@ def _profil_abschnitt(benutzer_id, konto):
     )
 
     if erfolg:
+        neue_email_normalisiert = neue_email.strip().lower()
         benutzer.sitzung_felder_aktualisieren(
             benutzername=neuer_benutzername.strip(),
-            email=neue_email.strip().lower(),
+            email=neue_email_normalisiert,
+            email_verified=not email_geaendert and konto["email_verified"],
         )
 
         if email_geaendert:
-            roher_token = speicher.email_verifizierung_erstellen(
-                benutzer_id, neue_email.strip().lower()
+            sicherheitslog.protokollieren(
+                sicherheitslog.EREIGNIS_EMAIL_GEAENDERT,
+                user_id=benutzer_id,
+                identitaet=neue_email_normalisiert,
             )
-            st.session_state["konto_verifizierung_token"] = roher_token
-            # Entwicklungsmodus: kein Anbieter angebunden, `email_versand`
-            # loggt die Nachricht nur (siehe dortige Doku) - der Nutzer
-            # bestätigt stattdessen unten direkt im Entwicklungsmodus.
+            roher_token = speicher.email_verifizierung_erstellen(benutzer_id, neue_email_normalisiert)
             email_versand.sende_email_geaendert(
-                neue_email.strip().lower(),
-                "Entwicklungsmodus: Bestätige die neue Adresse im Bereich "
-                "„Konto & Sicherheit“ unter „E-Mail-Bestätigung“.",
+                neue_email_normalisiert, email_versand.verifizierungs_link(roher_token)
             )
-            meldung += " Deine neue E-Mail-Adresse ist noch nicht bestätigt."
+            meldung += " Deine neue E-Mail-Adresse muss noch bestätigt werden."
 
     st.session_state["_konto_profil_meldung"] = (erfolg, meldung)
     st.rerun()
@@ -104,45 +105,28 @@ def _verifizierung_abschnitt(benutzer_id, konto):
 
     st.markdown("#### ✉️ E-Mail-Bestätigung ausstehend")
     komponenten.hinweis_dezent(
-        "Es ist noch kein E-Mail-Versand angebunden (siehe „email_versand.py“) "
-        "- die Bestätigung wird deshalb aktuell nicht erzwungen und "
-        "bestehende Entwicklungs-Konten werden dadurch nicht gesperrt. Im "
-        "Entwicklungsmodus kannst du die Bestätigung hier direkt auslösen, "
-        "so wie es später ein Klick auf den zugesendeten E-Mail-Link tun würde."
+        f"Wir haben eine Bestätigungs-E-Mail an **{konto['email']}** gesendet. "
+        "Klicke auf den Link darin, um deine Adresse zu bestätigen. Bis "
+        "dahin sind Dokument-Upload und die KI-Funktionen gesperrt (siehe "
+        "„✉️ E-Mail bestätigen“ in der Navigation)."
     )
 
     _meldung_anzeigen("_konto_verifizierung_meldung")
 
-    token = st.session_state.get("konto_verifizierung_token")
-    spalte_bestaetigen, spalte_neu = st.columns(2)
+    aktiv, wartezeit = ratenbegrenzung.resend_cooldown_aktiv(konto["email"])
 
-    if spalte_bestaetigen.button(
-        "E-Mail jetzt bestätigen (Entwicklungsmodus)",
-        key="konto_verifizieren_button",
-        disabled=not token,
-        use_container_width=True,
-    ):
-        erfolg, meldung = speicher.email_verifizierung_bestaetigen(token)
-        st.session_state.pop("konto_verifizierung_token", None)
-        st.session_state["_konto_verifizierung_meldung"] = (erfolg, meldung)
-        st.rerun()
-
-    if spalte_neu.button(
-        "Neuen Bestätigungslink anfordern",
+    if st.button(
+        "Bestätigungs-E-Mail erneut senden",
         key="konto_verifizierung_neu_button",
+        disabled=aktiv,
         use_container_width=True,
     ):
-        neuer_token = speicher.email_verifizierung_erstellen(benutzer_id, konto["email"])
-        st.session_state["konto_verifizierung_token"] = neuer_token
-        email_versand.sende_registrierung_verifizierung(
-            konto["email"],
-            "Entwicklungsmodus: Bestätige die Adresse im Bereich "
-            "„Konto & Sicherheit“ unter „E-Mail-Bestätigung“.",
-        )
-        st.session_state["_konto_verifizierung_meldung"] = (
-            True, "Ein neuer Bestätigungslink wurde erzeugt (Entwicklungsmodus)."
-        )
+        erfolg, text = benutzer.bestaetigungsmail_anfordern(benutzer_id, konto["email"])
+        st.session_state["_konto_verifizierung_meldung"] = (erfolg, text)
         st.rerun()
+
+    if aktiv:
+        st.caption(f"Erneutes Senden möglich in {ratenbegrenzung.wartezeit_text(wartezeit)}.")
 
 
 def _passwort_abschnitt(benutzer_id):
@@ -170,6 +154,15 @@ def _passwort_abschnitt(benutzer_id):
     erfolg, meldung = speicher.passwort_aendern(benutzer_id, aktuelles, neues)
 
     if erfolg:
+        # Alle ANDEREN Sitzungen dieses Benutzers ungültig machen (z. B.
+        # ein weiteres offenes Gerät/Tab) - die eigene, gerade aktive
+        # Sitzung bleibt bewusst ausgenommen, damit die Person, die die
+        # Änderung selbst vorgenommen hat, nicht sofort ausgeloggt wird.
+        speicher.sitzungen_widerrufen_fuer_benutzer(
+            benutzer_id, ausser_roher_token=benutzer.aktuelle_sitzung_token()
+        )
+        sicherheitslog.protokollieren(sicherheitslog.EREIGNIS_PASSWORT_GEAENDERT, user_id=benutzer_id)
+
         konto = speicher.benutzer_konto_daten(benutzer_id)
 
         if konto:
@@ -236,6 +229,9 @@ def _loeschen_abschnitt(benutzer_id, konto):
                 return
 
             empfaenger_email = konto["email"]
+            sicherheitslog.protokollieren(
+                sicherheitslog.EREIGNIS_KONTO_GELOESCHT, user_id=benutzer_id
+            )
             speicher.konto_endgueltig_loeschen(benutzer_id)
             email_versand.sende_konto_geloescht(empfaenger_email)
             benutzer.abmelden_nach_kontoloeschung()

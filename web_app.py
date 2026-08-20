@@ -10,6 +10,7 @@ import komponenten
 import konto
 import pruefung
 import retrieval
+import sicherheitslog
 import speicher
 from pdf_logik import frage_beantworten
 from quellen import (
@@ -28,6 +29,9 @@ BEREICH_BIBLIOTHEK = "📚 Dokumentenbibliothek"
 # stellung "klein halten") - erreichbar über die kleine Schaltfläche im
 # Konto-/Abmelde-Bereich der Sidebar (siehe `benutzer.konto_bereich`).
 BEREICH_KONTO = benutzer.BEREICH_KONTO
+# Einziger Bereich, den ein noch nicht e-mail-verifiziertes Konto neben
+# BEREICH_KONTO erreichen kann (siehe Zugriffsbeschränkung weiter unten).
+BEREICH_VERIFIZIERUNG = benutzer.BEREICH_VERIFIZIERUNG
 
 
 st.set_page_config(
@@ -42,6 +46,52 @@ komponenten.css_einbinden()
 speicher.datenbank_initialisieren()
 
 
+# Passwort-Reset-Link-Verarbeitung: bewusst VOR jeder Anmelde-Prüfung,
+# da dieser Ablauf per Definition OHNE bestehende Anmeldung funktionieren
+# muss (der Link kommt per E-Mail, der Empfänger ist zu diesem Zeitpunkt
+# in diesem Browser-Tab typischerweise nicht angemeldet). Berührt keine
+# ggf. anderswo bestehende Sitzung - siehe `benutzer.reset_passwort_seite`.
+_reset_token_qp = st.query_params.get("reset_token")
+
+if _reset_token_qp:
+    benutzer.reset_passwort_seite(_reset_token_qp)
+    st.stop()
+
+
+# E-Mail-Verifizierungs-Link-Verarbeitung: ebenfalls bewusst VOR der
+# Anmelde-Prüfung, da der Link typischerweise in einem NEUEN Browser-Tab
+# geöffnet wird (Streamlit-Sitzungen sind pro Tab), in dem noch keine
+# Anmeldung besteht. Der Token wird sofort eingelöst und aus der URL
+# entfernt (`st.query_params.clear()`), bevor irgendetwas anderes
+# gerendert wird - er soll weder erneut verarbeitet werden (Re-Run) noch
+# unnötig lange in der Adresszeile sichtbar bleiben. Eine ZUFÄLLIG in
+# diesem Tab bereits bestehende, angemeldete Sitzung wird NUR aktualisiert,
+# wenn sie zum selben Konto gehört wie der Token (siehe Rückgabewert
+# `betroffene_benutzer_id`) - eine andere angemeldete Sitzung bleibt
+# unangetastet (siehe CLAUDE.md-Anforderung zur Sitzungs-Trennung).
+_verify_token_qp = st.query_params.get("verify_token")
+
+if _verify_token_qp:
+    _erfolg, _meldung, _betroffene_benutzer_id = speicher.email_verifizierung_bestaetigen(_verify_token_qp)
+    st.query_params.clear()
+
+    if _erfolg:
+        sicherheitslog.protokollieren(
+            sicherheitslog.EREIGNIS_EMAIL_BESTAETIGT, user_id=_betroffene_benutzer_id
+        )
+
+        if benutzer.ist_angemeldet() and benutzer.aktueller_benutzer_id() == _betroffene_benutzer_id:
+            benutzer.sitzung_email_verifiziert_setzen()
+    else:
+        sicherheitslog.protokollieren(
+            sicherheitslog.EREIGNIS_VERIFIZIERUNG_FEHLGESCHLAGEN, erfolgreich=False
+        )
+
+    st.session_state["_verifizierung_meldung"] = (_erfolg, _meldung)
+    st.toast(_meldung, icon="✅" if _erfolg else "⚠️")
+    st.rerun()
+
+
 # Authentifizierungs-Schranke: Solange niemand angemeldet ist, wird
 # ausschließlich die Anmelde-/Registrierungsseite gerendert und der
 # Skriptlauf danach per st.stop() beendet - die normale Clevoriq-
@@ -52,6 +102,12 @@ speicher.datenbank_initialisieren()
 if not benutzer.ist_angemeldet():
     benutzer.authentifizierung_anzeigen()
     st.stop()
+
+# Validiert die serverseitige Sitzung dieses Laufs (Ablauf/Inaktivität/
+# anderswo erfolgter Widerruf, z. B. durch einen Logout in einem anderen
+# Tab oder eine Passwort-Änderung/-Reset) - beendet bei Ungültigkeit
+# selbst die Sitzung und rendert danach nichts Weiteres in diesem Lauf.
+benutzer.sitzung_gueltig_pruefen()
 
 benutzer_id = benutzer.aktueller_benutzer_id()
 
@@ -156,23 +212,45 @@ with st.sidebar:
     komponenten.marke_kopf()
 
     bereich = st.session_state.aktiver_bereich
+    _verifiziert = benutzer.email_verifiziert()
 
-    # Startseite bewusst größer/prominenter als die übrigen Bereiche
-    # (gleicher Button-Typ, nur über `gross=True` optisch hervorgehoben)
-    # - sie ist der primäre Einstiegspunkt der App.
-    if komponenten.nav_eintrag(BEREICH_START, aktiv=bereich == BEREICH_START, key="start", gross=True):
-        st.session_state.aktiver_bereich = BEREICH_START
-        st.rerun()
+    # Zugriffsbeschränkung für noch nicht e-mail-verifizierte Konten
+    # (siehe CLAUDE.md "E-Mail-Verifizierung"): sie dürfen sich anmelden
+    # und ihr Konto verwalten, aber keine Dokumente hochladen oder die
+    # KI-Funktionen (Chat/Analyse/Prüfung) nutzen. Ein noch auf einen der
+    # gesperrten Bereiche zeigender `aktiver_bereich` (z. B. von VOR der
+    # letzten Abmeldung) wird hier aktiv auf den Verifizierungs-Bereich
+    # umgebogen, bevor irgendetwas Bereichsspezifisches gerendert wird.
+    if not _verifiziert and bereich not in (BEREICH_VERIFIZIERUNG, BEREICH_KONTO):
+        st.session_state.aktiver_bereich = BEREICH_VERIFIZIERUNG
+        bereich = BEREICH_VERIFIZIERUNG
 
-    for ziel, key_suffix in (
-        (BEREICH_CHAT, "chat"),
-        (BEREICH_ANALYSE, "analyse"),
-        (BEREICH_PRUEFUNG, "pruefung"),
-        (BEREICH_BIBLIOTHEK, "bibliothek"),
-    ):
-        if komponenten.nav_eintrag(ziel, aktiv=bereich == ziel, key=key_suffix):
-            st.session_state.aktiver_bereich = ziel
+    if not _verifiziert:
+        # Nur der Verifizierungs-Bereich ist zusätzlich zu Konto &
+        # Sicherheit/Abmelden erreichbar - kein Startseite-/Chat-/Analyse-/
+        # Prüfung-/Bibliothek-Eintrag, solange die E-Mail nicht bestätigt ist.
+        if komponenten.nav_eintrag(
+            BEREICH_VERIFIZIERUNG, aktiv=bereich == BEREICH_VERIFIZIERUNG, key="verifizierung", gross=True
+        ):
+            st.session_state.aktiver_bereich = BEREICH_VERIFIZIERUNG
             st.rerun()
+    else:
+        # Startseite bewusst größer/prominenter als die übrigen Bereiche
+        # (gleicher Button-Typ, nur über `gross=True` optisch hervorgehoben)
+        # - sie ist der primäre Einstiegspunkt der App.
+        if komponenten.nav_eintrag(BEREICH_START, aktiv=bereich == BEREICH_START, key="start", gross=True):
+            st.session_state.aktiver_bereich = BEREICH_START
+            st.rerun()
+
+        for ziel, key_suffix in (
+            (BEREICH_CHAT, "chat"),
+            (BEREICH_ANALYSE, "analyse"),
+            (BEREICH_PRUEFUNG, "pruefung"),
+            (BEREICH_BIBLIOTHEK, "bibliothek"),
+        ):
+            if komponenten.nav_eintrag(ziel, aktiv=bereich == ziel, key=key_suffix):
+                st.session_state.aktiver_bereich = ziel
+                st.rerun()
 
     st.divider()
 
@@ -709,6 +787,10 @@ elif bereich == BEREICH_PRUEFUNG:
                 "Frage zur Prüfung stellen...",
                 "💬 Rückfragen zur Prüfung",
             )
+
+
+elif bereich == BEREICH_VERIFIZIERUNG:
+    benutzer.verifizierung_seite(benutzer_id)
 
 
 elif bereich == BEREICH_KONTO:

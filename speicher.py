@@ -42,6 +42,16 @@ import auth
 EMAIL_VERIFIZIERUNG_GUELTIGKEIT_STUNDEN = 24
 PASSWORT_RESET_GUELTIGKEIT_STUNDEN = 1
 
+# Sitzungs-Richtlinie (siehe `sitzung_erstellen`/`sitzung_pruefen_und_aktualisieren`):
+# eine serverseitige Sitzung ist spätestens nach `SITZUNG_MAX_LEBENSDAUER_STUNDEN`
+# absolut abgelaufen (unabhängig von Aktivität), UND wird vorher schon
+# ungültig, wenn seit `SITZUNG_INAKTIVITAET_MINUTEN` keine Aktivität mehr
+# registriert wurde (gleitendes Fenster, bei jeder Prüfung erneuert). Werte
+# bewusst moderat gewählt für eine Anwendung mit potenziell sensiblen
+# Dokumenten, ohne bei normaler Nutzung (eine Arbeitssitzung) störend zu wirken.
+SITZUNG_MAX_LEBENSDAUER_STUNDEN = 12
+SITZUNG_INAKTIVITAET_MINUTEN = 60
+
 
 APP_DATEN_ORDNER = Path(__file__).resolve().parent / "app_daten"
 BENUTZER_ORDNER = APP_DATEN_ORDNER / "users"
@@ -531,6 +541,32 @@ def datenbank_initialisieren():
                 laeuft_ab_am TEXT NOT NULL,
                 verwendet_am TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL REFERENCES benutzer(id) ON DELETE CASCADE,
+                token_hash TEXT NOT NULL UNIQUE,
+                erstellt_am TEXT NOT NULL,
+                last_activity_at TEXT NOT NULL,
+                laeuft_ab_am TEXT NOT NULL,
+                revoked_am TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS security_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                user_id INTEGER REFERENCES benutzer(id) ON DELETE SET NULL,
+                identitaet TEXT,
+                ip TEXT,
+                erfolgreich INTEGER NOT NULL DEFAULT 1,
+                detail TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token_hash);
+            CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+            CREATE INDEX IF NOT EXISTS idx_security_events_lookup
+                ON security_events(event_type, identitaet, ts);
             """
         )
 
@@ -614,6 +650,18 @@ def _jetzt():
 def benutzer_erstellen(benutzername, email, passwort):
     """Legt ein neues Benutzerkonto an und gibt die neue Benutzer-ID zurück.
 
+    Setzt `email_verified` EXPLIZIT auf 0: jede neue Registrierung ist
+    zunächst unbestätigt und muss ihre E-Mail-Adresse über den
+    zugesendeten Verifizierungslink bestätigen (siehe
+    `email_verifizierung_erstellen`/`email_verifizierung_bestaetigen`
+    und die Zugriffsbeschränkung in `web_app.py`). Das Tabellen-Default
+    für `email_verified` bleibt bewusst bei 1 (siehe `datenbank_initialisieren`)
+    - es gilt nur für Zeilen, die NICHT über diese Funktion angelegt
+    wurden (das Migrations-/Bootstrap-Konto `_migrations_benutzer_id`
+    und jede bereits vor dieser Funktions-Änderung bestehende Zeile),
+    damit bestehende bzw. Entwicklungs-/Migrationskonten durch die neue
+    Verifizierungspflicht nicht nachträglich ausgesperrt werden.
+
     Wirft `sqlite3.IntegrityError`, wenn Benutzername oder E-Mail schon
     vergeben sind (`UNIQUE`-Constraints) - `benutzer.py` prüft dies
     vorab bereits gezielt (für konkrete deutsche Fehlermeldungen), diese
@@ -624,8 +672,9 @@ def benutzer_erstellen(benutzername, email, passwort):
 
     with _verbindung() as conn:
         cursor = conn.execute(
-            "INSERT INTO benutzer (benutzername, email, passwort_hash, erstellt_am, aktualisiert_am, aktiv) "
-            "VALUES (?, ?, ?, ?, ?, 1)",
+            "INSERT INTO benutzer "
+            "(benutzername, email, passwort_hash, erstellt_am, aktualisiert_am, aktiv, email_verified) "
+            "VALUES (?, ?, ?, ?, ?, 1, 0)",
             (benutzername.strip(), email.strip().lower(), auth.passwort_hash(passwort), jetzt, jetzt),
         )
         return cursor.lastrowid
@@ -866,13 +915,17 @@ def email_verifizierung_erstellen(benutzer_id, email):
 def email_verifizierung_bestaetigen(roher_token):
     """Löst einen E-Mail-Verifizierungs-Token ein (einmalig, mit Ablauf).
 
-    Gibt `(erfolg: bool, meldung: str)` zurück. Setzt `email_verified`
-    nur, wenn die im Token hinterlegte E-Mail noch mit der AKTUELLEN
-    E-Mail des Kontos übereinstimmt - verhindert, dass ein alter Link zu
-    einer inzwischen erneut geänderten Adresse noch etwas bewirkt.
+    Gibt `(erfolg: bool, meldung: str, user_id_oder_None)` zurück. Setzt
+    `email_verified` nur, wenn die im Token hinterlegte E-Mail noch mit
+    der AKTUELLEN E-Mail des Kontos übereinstimmt - verhindert, dass ein
+    alter Link zu einer inzwischen erneut geänderten Adresse noch etwas
+    bewirkt. `user_id` wird bei Erfolg zurückgegeben, damit der Aufrufer
+    (siehe `web_app.py`) bei Bedarf eine PASSENDE, bereits angemeldete
+    Sitzung aktualisieren kann - ohne dass dafür die aktuell angemeldete
+    Sitzung blind als Ziel angenommen werden müsste (siehe Anforderung
+    "bestehende Session darf nicht versehentlich einem anderen Benutzer
+    zugeordnet werden").
     """
-    zeile_gefunden = None
-
     with _verbindung() as conn:
         zeile = conn.execute(
             "SELECT id, user_id, email, laeuft_ab_am FROM email_verifications "
@@ -881,10 +934,10 @@ def email_verifizierung_bestaetigen(roher_token):
         ).fetchone()
 
         if not zeile:
-            return False, "Dieser Bestätigungslink ist ungültig oder wurde bereits verwendet."
+            return False, "Dieser Bestätigungslink ist ungültig oder wurde bereits verwendet.", None
 
         if datetime.fromisoformat(zeile["laeuft_ab_am"]) < datetime.now():
-            return False, "Dieser Bestätigungslink ist abgelaufen."
+            return False, "Dieser Bestätigungslink ist abgelaufen.", None
 
         conn.execute(
             "UPDATE email_verifications SET verwendet_am = ? WHERE id = ?",
@@ -894,27 +947,32 @@ def email_verifizierung_bestaetigen(roher_token):
             "UPDATE benutzer SET email_verified = 1 WHERE id = ? AND email = ?",
             (zeile["user_id"], zeile["email"]),
         )
-        zeile_gefunden = zeile
 
-    return True, "Deine E-Mail-Adresse wurde bestätigt."
+    return True, "Deine E-Mail-Adresse wurde bestätigt.", zeile["user_id"]
 
 
 def passwort_reset_anfordern(email_oder_benutzername):
     """Erzeugt (falls ein aktives Konto zu dieser Login-Kennung existiert)
-    einen neuen Passwort-Reset-Token und gibt ihn im KLARTEXT zurück -
-    gespeichert wird ausschließlich sein Hash. Ältere, noch nicht
-    eingelöste Reset-Tokens desselben Benutzers werden zuvor ungültig
-    gemacht.
+    einen neuen Passwort-Reset-Token und gibt `(roher_token, konto_email)`
+    im KLARTEXT zurück - gespeichert wird ausschließlich der Token-Hash.
+    Ältere, noch nicht eingelöste Reset-Tokens desselben Benutzers werden
+    zuvor ungültig gemacht. `konto_email` wird mit zurückgegeben, damit
+    der Aufrufer (siehe `benutzer.py`) die Reset-Mail an die TATSÄCHLICHE
+    Konto-Adresse schicken kann, auch wenn `email_oder_benutzername` ein
+    Benutzername war - ohne dafür einen zweiten, separaten Lookup zu
+    brauchen (der ein winziges Timing-Unterscheidungsmerkmal zwischen
+    "Konto existiert"/"existiert nicht" wäre).
 
-    Gibt `None` zurück, wenn keine passende Login-Kennung existiert -
-    bewusst OHNE unterscheidbare Fehlermeldung an den Aufrufer, damit
-    sich daraus nicht ableiten lässt, ob ein Konto zu dieser E-Mail/
-    diesem Benutzernamen existiert (Schutz vor User-Enumeration).
+    Gibt `(None, None)` zurück, wenn keine passende Login-Kennung
+    existiert - bewusst OHNE unterscheidbare Fehlermeldung an den
+    Aufrufer, damit sich daraus nicht ableiten lässt, ob ein Konto zu
+    dieser E-Mail/diesem Benutzernamen existiert (Schutz vor
+    User-Enumeration).
     """
     benutzer = benutzer_nach_login(email_oder_benutzername)
 
     if not benutzer:
-        return None
+        return None, None
 
     roher_token = secrets.token_urlsafe(32)
     laeuft_ab = (
@@ -933,20 +991,27 @@ def passwort_reset_anfordern(email_oder_benutzername):
             (benutzer["id"], _token_hash(roher_token), _jetzt(), laeuft_ab),
         )
 
-    return roher_token
+    return roher_token, benutzer["email"]
 
 
 def passwort_reset_einloesen(roher_token, neues_passwort):
     """Löst einen Passwort-Reset-Token ein und setzt das neue Passwort.
 
-    Gibt `(erfolg: bool, meldung: str)` zurück. Einmalig verwendbar
-    (`verwendet_am` wird sofort gesetzt) und zeitlich begrenzt gültig.
+    Gibt `(erfolg: bool, meldung: str, user_id_oder_None)` zurück.
+    Einmalig verwendbar (`verwendet_am` wird sofort gesetzt) und
+    zeitlich begrenzt gültig. Macht bei Erfolg zusätzlich ALLE
+    Sitzungen dieses Benutzers ungültig (`sitzungen_widerrufen_fuer_benutzer`,
+    ohne Ausnahme) - dieser Ablauf ist per Definition nicht an eine
+    aktuell angemeldete Sitzung gebunden (das Zurücksetzen erfolgt über
+    einen per E-Mail zugestellten Link, nicht im angemeldeten Zustand),
+    ein Benutzer muss sich danach überall erneut mit dem neuen Passwort
+    anmelden.
     """
     if not auth.passwort_stark_genug(neues_passwort):
         return False, (
             f"Das neue Passwort muss mindestens "
             f"{auth.MINDEST_PASSWORT_LAENGE} Zeichen enthalten."
-        )
+        ), None
 
     with _verbindung() as conn:
         zeile = conn.execute(
@@ -956,10 +1021,10 @@ def passwort_reset_einloesen(roher_token, neues_passwort):
         ).fetchone()
 
         if not zeile:
-            return False, "Dieser Link ist ungültig oder wurde bereits verwendet."
+            return False, "Dieser Link ist ungültig oder wurde bereits verwendet.", None
 
         if datetime.fromisoformat(zeile["laeuft_ab_am"]) < datetime.now():
-            return False, "Dieser Link ist abgelaufen."
+            return False, "Dieser Link ist abgelaufen.", None
 
         conn.execute(
             "UPDATE benutzer SET passwort_hash = ?, aktualisiert_am = ? WHERE id = ?",
@@ -969,8 +1034,176 @@ def passwort_reset_einloesen(roher_token, neues_passwort):
             "UPDATE password_resets SET verwendet_am = ? WHERE id = ?",
             (_jetzt(), zeile["id"]),
         )
+        benutzer_id = zeile["user_id"]
 
-    return True, "Dein Passwort wurde zurückgesetzt."
+    sitzungen_widerrufen_fuer_benutzer(benutzer_id)
+
+    return True, "Dein Passwort wurde zurückgesetzt.", benutzer_id
+
+
+# --- Serverseitige Sitzungen ---
+#
+# Ergänzt das bisherige, rein `st.session_state`-basierte Sitzungsmodell
+# (siehe `benutzer.py`-Moduldocstring) um eine serverseitige, in der DB
+# gespeicherte Gegenstelle: `st.session_state` selbst bleibt weiterhin
+# NICHT netzwerk-/client-seitig manipulierbar (es ist kein Cookie), aber
+# ohne einen serverseitigen Datensatz gäbe es keine Möglichkeit, eine
+# Sitzung AKTIV zu widerrufen (Logout in einem anderen Tab, Passwort-
+# Änderung/-Reset, Kontolöschung) - eine zweite gleichzeitig offene
+# Streamlit-Sitzung desselben Benutzers (anderer Tab/anderes Gerät)
+# würde sonst von einer solchen Aktion nichts mitbekommen. Gespeichert
+# wird - wie bei den Verifizierungs-/Reset-Tokens - ausschließlich ein
+# Hash des Sitzungs-Tokens, nie der Token selbst.
+#
+# Bekannte, im Streamlit-Modell verbleibende Grenze (siehe auch CLAUDE.md):
+# es gibt kein HttpOnly/Secure-Cookie und keine Serverseitige Bindung an
+# den Browser - der rohe Token liegt clientseitig nur in `st.session_state`
+# des jeweiligen Tabs (nicht in der URL, nicht in einem für JavaScript
+# lesbaren Cookie). Ein vollwertiger Schutz gegen Session-Hijacking auf
+# Netzwerk-/Browser-Ebene erfordert eine echte Cookie-/Auth-Header-
+# Architektur, die Streamlit in dieser Form nicht bietet.
+
+
+def sitzung_erstellen(benutzer_id):
+    """Erstellt eine neue serverseitige Sitzung und gibt ihren Klartext-
+    Token zurück (einzige Gelegenheit - gespeichert wird nur sein Hash).
+
+    IMMER ein neuer, frischer Token - nie eine Wiederverwendung eines
+    bestehenden - schützt inhärent vor Session-Fixation: nach jedem
+    erfolgreichen Login (`benutzer._login_versuchen`) bzw. jeder
+    Registrierung entsteht eine komplett neue Sitzungs-Identität.
+    """
+    roher_token = secrets.token_urlsafe(32)
+    jetzt = _jetzt()
+    laeuft_ab = (
+        datetime.now() + timedelta(hours=SITZUNG_MAX_LEBENSDAUER_STUNDEN)
+    ).isoformat(timespec="seconds")
+
+    with _verbindung() as conn:
+        conn.execute(
+            "INSERT INTO sessions (user_id, token_hash, erstellt_am, last_activity_at, laeuft_ab_am) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (benutzer_id, _token_hash(roher_token), jetzt, jetzt, laeuft_ab),
+        )
+
+    return roher_token
+
+
+def sitzung_pruefen_und_aktualisieren(roher_token):
+    """Prüft eine Sitzung gegen die DB (widerrufen? abgelaufen? inaktiv?)
+    und erneuert bei Gültigkeit `last_activity_at` (gleitendes
+    Inaktivitäts-Fenster). Gibt die `user_id` bei Gültigkeit zurück,
+    sonst `None` - MUSS bei jedem Lauf aufgerufen werden, solange eine
+    Sitzung als "angemeldet" gilt (siehe `benutzer.sitzung_gueltig_pruefen`).
+    """
+    if not roher_token:
+        return None
+
+    with _verbindung() as conn:
+        zeile = conn.execute(
+            "SELECT id, user_id, last_activity_at, laeuft_ab_am FROM sessions "
+            "WHERE token_hash = ? AND revoked_am IS NULL",
+            (_token_hash(roher_token),),
+        ).fetchone()
+
+        if not zeile:
+            return None
+
+        jetzt_dt = datetime.now()
+
+        if datetime.fromisoformat(zeile["laeuft_ab_am"]) < jetzt_dt:
+            return None
+
+        inaktiv_seit = datetime.fromisoformat(zeile["last_activity_at"])
+        if inaktiv_seit + timedelta(minutes=SITZUNG_INAKTIVITAET_MINUTEN) < jetzt_dt:
+            return None
+
+        conn.execute(
+            "UPDATE sessions SET last_activity_at = ? WHERE id = ?", (_jetzt(), zeile["id"])
+        )
+
+    return zeile["user_id"]
+
+
+def sitzung_widerrufen(roher_token):
+    """Beendet genau eine Sitzung (z. B. expliziter Logout)."""
+    if not roher_token:
+        return
+
+    with _verbindung() as conn:
+        conn.execute(
+            "UPDATE sessions SET revoked_am = ? WHERE token_hash = ? AND revoked_am IS NULL",
+            (_jetzt(), _token_hash(roher_token)),
+        )
+
+
+def sitzungen_widerrufen_fuer_benutzer(benutzer_id, ausser_roher_token=None):
+    """Beendet ALLE Sitzungen dieses Benutzers, optional außer einer
+    einzigen (`ausser_roher_token`, z. B. die gerade aktive Sitzung bei
+    einer selbst durchgeführten Passwort-Änderung - siehe `konto.py`).
+    Ohne Ausnahme (Standardfall, z. B. Passwort-Reset, Kontolöschung
+    - dort per Fremdschlüssel-Kaskade ohnehin implizit) werden
+    ausnahmslos alle Sitzungen beendet.
+    """
+    ausnahme_hash = _token_hash(ausser_roher_token) if ausser_roher_token else None
+
+    with _verbindung() as conn:
+        conn.execute(
+            "UPDATE sessions SET revoked_am = ? "
+            "WHERE user_id = ? AND revoked_am IS NULL AND token_hash IS NOT ?",
+            (_jetzt(), benutzer_id, ausnahme_hash),
+        )
+
+
+# --- Security-/Audit-Ereignisse & persistentes Rate-Limiting ---
+#
+# Eine einzige Tabelle (`security_events`) bedient zwei Zwecke: (1) ein
+# minimales Audit-Log sicherheitsrelevanter Ereignisse (Login-Erfolg/
+# -Fehlschlag, Passwort-/E-Mail-Änderungen, ...), (2) die Datengrundlage
+# für das persistente Rate-Limiting in `ratenbegrenzung.py` (Zählung von
+# Versuchen je Aktion/Identität in einem gleitenden Zeitfenster). Bewusst
+# NIE Passwörter, Tokens oder API-Keys - siehe `sicherheitslog.py`.
+
+
+def sicherheitsereignis_speichern(event_type, user_id, identitaet, ip, erfolgreich, detail):
+    with _verbindung() as conn:
+        conn.execute(
+            "INSERT INTO security_events "
+            "(ts, event_type, user_id, identitaet, ip, erfolgreich, detail) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (_jetzt(), event_type, user_id, identitaet, ip, 1 if erfolgreich else 0, detail),
+        )
+
+
+def sicherheitsereignisse_zaehlen(event_type, identitaet, seit_iso, nur_fehlgeschlagen=False):
+    """Zählt Ereignisse eines Typs für eine (normalisierte) Identität seit
+    einem Zeitpunkt - Grundlage für `ratenbegrenzung.pruefen`."""
+    query = (
+        "SELECT COUNT(*) AS anzahl FROM security_events "
+        "WHERE event_type = ? AND identitaet = ? AND ts >= ?"
+    )
+    parameter = [event_type, identitaet, seit_iso]
+
+    if nur_fehlgeschlagen:
+        query += " AND erfolgreich = 0"
+
+    with _verbindung() as conn:
+        zeile = conn.execute(query, parameter).fetchone()
+
+    return zeile["anzahl"]
+
+
+def letztes_ereignis_zeitpunkt(event_type, identitaet):
+    """Zeitstempel (ISO-String) des letzten Ereignisses dieses Typs für
+    diese Identität, oder `None` - genutzt für Cooldowns/Eskalation."""
+    with _verbindung() as conn:
+        zeile = conn.execute(
+            "SELECT ts FROM security_events WHERE event_type = ? AND identitaet = ? "
+            "ORDER BY ts DESC LIMIT 1",
+            (event_type, identitaet),
+        ).fetchone()
+
+    return zeile["ts"] if zeile else None
 
 
 def konto_passwort_gueltig(benutzer_id, passwort):
