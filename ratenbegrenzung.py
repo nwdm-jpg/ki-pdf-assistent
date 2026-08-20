@@ -41,12 +41,29 @@ import speicher
 #   Missbrauchs-/Spam-Flächen (E-Mail-Flut, Enumeration-Versuche).
 # - email_verification_attempt: nur fehlgeschlagene (ungültige/abgelaufene)
 #   Tokens zählen - ein gültiger Link soll nie limitiert werden.
+# - totp_verify/backup_code_verify: falsche Codes während einer 2FA-
+#   Login-Challenge - nur Fehlversuche zählen (siehe auch die EIGENE,
+#   strengere Fehlversuchsgrenze je Challenge in
+#   `speicher.ZWEI_FAKTOR_CHALLENGE_MAX_FEHLVERSUCHE`; dieses Limit hier
+#   wirkt zusätzlich ÜBER mehrere Logins/Challenges hinweg, keyed auf die
+#   Benutzeridentität, da eine neue Challenge sonst das Limit umginge).
+# - 2fa_setup_verify: falscher Bestätigungscode beim Einrichten/Neu-
+#   Einrichten von 2FA - nur Fehlversuche zählen.
+# - 2fa_disable/backup_codes_regenerate: Fehlversuche beim zweiten Faktor
+#   während einer Deaktivierung bzw. Neu-Erzeugung von Backup-Codes -
+#   nur Fehlversuche zählen (das Passwort wurde an dieser Stelle bereits
+#   separat geprüft, siehe `konto.py`).
 _LIMITS = {
     "login": (5, 15, 15, True),
     "register": (5, 60, 30, False),
     "password_reset_request": (5, 60, 30, False),
     "resend_verification": (3, 15, 15, False),
     "email_verification_attempt": (10, 15, 30, True),
+    "totp_verify": (5, 15, 15, True),
+    "backup_code_verify": (5, 15, 15, True),
+    "2fa_setup_verify": (5, 15, 15, True),
+    "2fa_disable": (5, 60, 30, True),
+    "backup_codes_regenerate": (5, 60, 30, True),
 }
 
 # Eigener, kurzer Mindestabstand zwischen zwei "Bestätigungs-E-Mail

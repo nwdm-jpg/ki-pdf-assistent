@@ -6,3 +6,7 @@ python-docx
 openpyxl
 python-pptx
 argon2-cffi
+pyotp
+cryptography
+qrcode
+Pillow

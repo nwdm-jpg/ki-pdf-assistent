@@ -33,6 +33,7 @@ from pathlib import Path
 import numpy as np
 
 import auth
+import zwei_faktor_krypto
 
 
 # Gültigkeitsdauer sicherheitsrelevanter Einmal-Tokens (siehe
@@ -51,6 +52,19 @@ PASSWORT_RESET_GUELTIGKEIT_STUNDEN = 1
 # Dokumenten, ohne bei normaler Nutzung (eine Arbeitssitzung) störend zu wirken.
 SITZUNG_MAX_LEBENSDAUER_STUNDEN = 12
 SITZUNG_INAKTIVITAET_MINUTEN = 60
+
+# Zwei-Faktor-Authentifizierung (TOTP, siehe `zwei_faktor_krypto.py`):
+# ein PENDING-Secret (während der Einrichtung, noch nicht bestätigt) wird
+# nach `PENDING_2FA_GUELTIGKEIT_MINUTEN` verworfen, wenn der Nutzer das
+# Setup nicht abschließt - kein halb aktiviertes 2FA bleibt unbegrenzt
+# lange bestehen. Eine Login-Challenge (nach korrektem Passwort, vor
+# vollständiger Anmeldung) ist nur `ZWEI_FAKTOR_CHALLENGE_GUELTIGKEIT_MINUTEN`
+# gültig und wird nach `ZWEI_FAKTOR_CHALLENGE_MAX_FEHLVERSUCHE` falschen
+# Codes endgültig beendet (ein neuer normaler Login ist dann erforderlich).
+PENDING_2FA_GUELTIGKEIT_MINUTEN = 15
+ZWEI_FAKTOR_CHALLENGE_GUELTIGKEIT_MINUTEN = 10
+ZWEI_FAKTOR_CHALLENGE_MAX_FEHLVERSUCHE = 5
+BACKUP_CODES_ANZAHL = 10
 
 
 APP_DATEN_ORDNER = Path(__file__).resolve().parent / "app_daten"
@@ -567,6 +581,43 @@ def datenbank_initialisieren():
             CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
             CREATE INDEX IF NOT EXISTS idx_security_events_lookup
                 ON security_events(event_type, identitaet, ts);
+
+            CREATE TABLE IF NOT EXISTS zwei_faktor (
+                user_id INTEGER PRIMARY KEY REFERENCES benutzer(id) ON DELETE CASCADE,
+                aktiv INTEGER NOT NULL DEFAULT 0,
+                secret_verschluesselt TEXT,
+                secret_key_version INTEGER,
+                pending_secret_verschluesselt TEXT,
+                pending_key_version INTEGER,
+                pending_erstellt_am TEXT,
+                letzter_zeitschritt INTEGER,
+                aktiviert_am TEXT,
+                aktualisiert_am TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS backup_codes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL REFERENCES benutzer(id) ON DELETE CASCADE,
+                code_hash TEXT NOT NULL,
+                erstellt_am TEXT NOT NULL,
+                verwendet_am TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS zwei_faktor_challenges (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL REFERENCES benutzer(id) ON DELETE CASCADE,
+                challenge_token_hash TEXT NOT NULL UNIQUE,
+                erstellt_am TEXT NOT NULL,
+                laeuft_ab_am TEXT NOT NULL,
+                fehlversuche INTEGER NOT NULL DEFAULT 0,
+                verwendet_am TEXT,
+                abgebrochen_am TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_backup_codes_user ON backup_codes(user_id);
+            CREATE INDEX IF NOT EXISTS idx_2fa_challenges_token
+                ON zwei_faktor_challenges(challenge_token_hash);
+            CREATE INDEX IF NOT EXISTS idx_2fa_challenges_user ON zwei_faktor_challenges(user_id);
             """
         )
 
@@ -1649,3 +1700,400 @@ def nachricht_hinzufuegen(chat_id, benutzer_id, frage, antwort, quellen):
             "UPDATE chats SET aktualisiert_am = ?, titel = ? WHERE id = ? AND user_id = ?",
             (jetzt, neuer_titel, chat_id, benutzer_id),
         )
+
+
+# --- Zwei-Faktor-Authentifizierung (TOTP) ---
+#
+# Persistenz für `zwei_faktor` (1:1 je Benutzer - Zeilenabwesenheit
+# bedeutet "2FA nie eingerichtet/deaktiviert", das ist bewusst der
+# Standardzustand JEDES bestehenden Kontos, ohne dass eine Migration
+# nötig wäre), `backup_codes` (nur Hashes, nie Klartext) und
+# `zwei_faktor_challenges` (die serverseitige Login-Challenge zwischen
+# korrektem Passwort und vollständiger Anmeldung). Alle drei Tabellen
+# kaskadieren über `ON DELETE CASCADE` von `benutzer(id)` - eine
+# Kontolöschung (`konto_endgueltig_loeschen`) entfernt daher automatisch
+# ALLE 2FA-Daten mit, ohne dass dieser Abschnitt dafür etwas Eigenes tun
+# müsste. Die eigentliche TOTP-/Verschlüsselungs-/Backup-Code-Logik lebt
+# in `zwei_faktor_krypto.py` (Streamlit-/DB-unabhängig) - dieser
+# Abschnitt bindet sie nur an die Datenbank an, analog zur Trennung
+# `auth.py`/`speicher.py` bei Passwörtern.
+
+
+def _ist_abgelaufen(zeitstempel_iso, minuten):
+    if not zeitstempel_iso:
+        return True
+    return datetime.fromisoformat(zeitstempel_iso) + timedelta(minutes=minuten) < datetime.now()
+
+
+def zwei_faktor_status(benutzer_id):
+    """Gibt `{"aktiv": bool, "pending": bool}` zurück. Ein PENDING-Secret,
+    dessen Einrichtungsfrist (`PENDING_2FA_GUELTIGKEIT_MINUTEN`) verstrichen
+    ist, wird hier lazy verworfen (siehe `_pending_verwerfen`) - ein
+    abgebrochenes Setup blockiert dadurch nie einen späteren Neustart."""
+    with _verbindung() as conn:
+        zeile = conn.execute(
+            "SELECT aktiv, pending_secret_verschluesselt, pending_erstellt_am "
+            "FROM zwei_faktor WHERE user_id = ?",
+            (benutzer_id,),
+        ).fetchone()
+
+    if not zeile:
+        return {"aktiv": False, "pending": False}
+
+    pending_vorhanden = bool(zeile["pending_secret_verschluesselt"])
+    pending_abgelaufen = pending_vorhanden and _ist_abgelaufen(
+        zeile["pending_erstellt_am"], PENDING_2FA_GUELTIGKEIT_MINUTEN
+    )
+
+    if pending_vorhanden and pending_abgelaufen:
+        _pending_verwerfen(benutzer_id)
+
+    return {"aktiv": bool(zeile["aktiv"]), "pending": pending_vorhanden and not pending_abgelaufen}
+
+
+def _pending_verwerfen(benutzer_id):
+    with _verbindung() as conn:
+        conn.execute(
+            "UPDATE zwei_faktor SET pending_secret_verschluesselt = NULL, "
+            "pending_key_version = NULL, pending_erstellt_am = NULL, aktualisiert_am = ? "
+            "WHERE user_id = ?",
+            (_jetzt(), benutzer_id),
+        )
+
+
+def zwei_faktor_setup_starten(benutzer_id):
+    """Erzeugt ein neues PENDING-TOTP-Secret (ersetzt ein evtl. noch
+    vorhandenes altes Pending-Secret) und gibt `(klartext_secret,
+    otpauth_uri)` zurück - das Secret im Klartext wird NIRGENDS
+    gespeichert, nur seine verschlüsselte Form. Rührt ein eventuell
+    bereits AKTIVES Secret nicht an: sowohl die Erst-Einrichtung als auch
+    eine spätere Neu-Einrichtung/Rotation (siehe `konto.py`) ersetzen das
+    aktive Secret erst bei erfolgreicher Bestätigung des neuen Codes
+    (`zwei_faktor_setup_bestaetigen`), nie vorher.
+    """
+    email = benutzer_konto_daten(benutzer_id)["email"]
+    klartext_secret = zwei_faktor_krypto.neues_totp_secret()
+    chiffrat, key_version = zwei_faktor_krypto.secret_verschluesseln(klartext_secret)
+    jetzt = _jetzt()
+
+    with _verbindung() as conn:
+        vorhanden = conn.execute(
+            "SELECT 1 FROM zwei_faktor WHERE user_id = ?", (benutzer_id,)
+        ).fetchone()
+
+        if vorhanden:
+            conn.execute(
+                "UPDATE zwei_faktor SET pending_secret_verschluesselt = ?, "
+                "pending_key_version = ?, pending_erstellt_am = ?, aktualisiert_am = ? "
+                "WHERE user_id = ?",
+                (chiffrat, key_version, jetzt, jetzt, benutzer_id),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO zwei_faktor "
+                "(user_id, aktiv, pending_secret_verschluesselt, pending_key_version, "
+                "pending_erstellt_am, aktualisiert_am) VALUES (?, 0, ?, ?, ?, ?)",
+                (benutzer_id, chiffrat, key_version, jetzt, jetzt),
+            )
+
+    return klartext_secret, zwei_faktor_krypto.otpauth_uri(klartext_secret, email)
+
+
+def zwei_faktor_setup_abbrechen(benutzer_id):
+    """Verwirft ein laufendes Pending-Setup vorzeitig (Nutzer bricht die
+    Einrichtung selbst ab, siehe `konto.py`) - dasselbe Aufräumen, das
+    sonst lazy nach `PENDING_2FA_GUELTIGKEIT_MINUTEN` passiert, nur
+    sofort statt erst beim nächsten Statuscheck. Ein bereits AKTIVES
+    Secret bleibt davon unberührt."""
+    _pending_verwerfen(benutzer_id)
+
+
+def zwei_faktor_setup_bestaetigen(benutzer_id, code):
+    """Prüft `code` gegen das PENDING-Secret; bei Erfolg wird es zum
+    AKTIVEN Secret (Erst-Einrichtung ODER Ersetzen eines vorhandenen
+    aktiven Secrets bei einer Neu-Einrichtung/Rotation - siehe
+    `konto.py`), und neue Backup-Codes werden erzeugt (siehe
+    `zwei_faktor_backup_codes_neu_erzeugen`, macht dabei automatisch alte
+    Backup-Codes ungültig). Gibt `(erfolg, meldung, backup_codes_klartext)`
+    zurück - `backup_codes_klartext` ist NUR bei Erfolg gesetzt (einzige
+    Gelegenheit, sie zu sehen).
+    """
+    with _verbindung() as conn:
+        zeile = conn.execute(
+            "SELECT pending_secret_verschluesselt, pending_key_version, pending_erstellt_am "
+            "FROM zwei_faktor WHERE user_id = ?",
+            (benutzer_id,),
+        ).fetchone()
+
+    if not zeile or not zeile["pending_secret_verschluesselt"]:
+        return False, "Es läuft gerade keine 2FA-Einrichtung. Bitte starte sie erneut.", None
+
+    if _ist_abgelaufen(zeile["pending_erstellt_am"], PENDING_2FA_GUELTIGKEIT_MINUTEN):
+        _pending_verwerfen(benutzer_id)
+        return False, "Die Einrichtung ist abgelaufen. Bitte starte sie erneut.", None
+
+    try:
+        secret = zwei_faktor_krypto.secret_entschluesseln(
+            zeile["pending_secret_verschluesselt"], zeile["pending_key_version"]
+        )
+    except RuntimeError:
+        return False, "2FA konnte technisch nicht geprüft werden. Bitte später erneut versuchen.", None
+
+    gueltig, _zeitschritt = zwei_faktor_krypto.totp_code_pruefen(secret, code)
+
+    if not gueltig:
+        return False, "Der eingegebene Code ist falsch oder abgelaufen.", None
+
+    jetzt = _jetzt()
+
+    with _verbindung() as conn:
+        conn.execute(
+            "UPDATE zwei_faktor SET aktiv = 1, secret_verschluesselt = ?, "
+            "secret_key_version = ?, letzter_zeitschritt = ?, "
+            "pending_secret_verschluesselt = NULL, pending_key_version = NULL, "
+            "pending_erstellt_am = NULL, aktiviert_am = ?, aktualisiert_am = ? "
+            "WHERE user_id = ?",
+            (
+                zeile["pending_secret_verschluesselt"],
+                zeile["pending_key_version"],
+                _zeitschritt,
+                jetzt,
+                jetzt,
+                benutzer_id,
+            ),
+        )
+
+    backup_codes_klartext = zwei_faktor_backup_codes_neu_erzeugen(benutzer_id)
+
+    return True, "Zwei-Faktor-Authentifizierung wurde aktiviert.", backup_codes_klartext
+
+
+def zwei_faktor_backup_codes_neu_erzeugen(benutzer_id):
+    """Erzeugt `BACKUP_CODES_ANZAHL` neue Backup-Codes und macht dabei
+    ALLE bisherigen Codes dieses Benutzers sofort ungültig (harte
+    Ersetzung, kein Anhängen). Gibt die neuen Codes im KLARTEXT zurück -
+    einzige Gelegenheit, sie zu sehen; gespeichert werden ausschließlich
+    ihre Hashes (`_token_hash`, derselbe SHA-256 wie für andere
+    hoch-entropische Zufalls-Token dieser App)."""
+    klartext_codes = zwei_faktor_krypto.backup_codes_erzeugen(BACKUP_CODES_ANZAHL)
+    jetzt = _jetzt()
+
+    with _verbindung() as conn:
+        conn.execute("DELETE FROM backup_codes WHERE user_id = ?", (benutzer_id,))
+        conn.executemany(
+            "INSERT INTO backup_codes (user_id, code_hash, erstellt_am) VALUES (?, ?, ?)",
+            [
+                (benutzer_id, _token_hash(zwei_faktor_krypto.backup_code_normalisieren(code)), jetzt)
+                for code in klartext_codes
+            ],
+        )
+
+    return klartext_codes
+
+
+def zwei_faktor_backup_codes_anzahl_uebrig(benutzer_id):
+    """Anzahl noch UNVERWENDETER Backup-Codes - für eine reine
+    Status-Anzeige ("noch 7 von 10 übrig"). Verrät nie, WELCHE Codes
+    noch gültig sind."""
+    with _verbindung() as conn:
+        zeile = conn.execute(
+            "SELECT COUNT(*) AS anzahl FROM backup_codes WHERE user_id = ? AND verwendet_am IS NULL",
+            (benutzer_id,),
+        ).fetchone()
+
+    return zeile["anzahl"]
+
+
+def zwei_faktor_backup_code_pruefen_und_verbrauchen(benutzer_id, code):
+    """Prüft einen Backup-Code gegen die gespeicherten Hashes DIESES
+    Benutzers und markiert ihn bei Erfolg SOFORT als verbraucht (einmalig
+    verwendbar). Gibt `True`/`False` zurück."""
+    normalisiert = zwei_faktor_krypto.backup_code_normalisieren(code)
+
+    if not normalisiert:
+        return False
+
+    code_hash = _token_hash(normalisiert)
+
+    with _verbindung() as conn:
+        zeile = conn.execute(
+            "SELECT id FROM backup_codes WHERE user_id = ? AND code_hash = ? AND verwendet_am IS NULL",
+            (benutzer_id, code_hash),
+        ).fetchone()
+
+        if not zeile:
+            return False
+
+        conn.execute("UPDATE backup_codes SET verwendet_am = ? WHERE id = ?", (_jetzt(), zeile["id"]))
+
+    return True
+
+
+def zwei_faktor_totp_pruefen(benutzer_id, code):
+    """Prüft `code` gegen das AKTIVE TOTP-Secret dieses Benutzers
+    inklusive Replay-Schutz (verhindert, dass derselbe Zeitschritt
+    zweimal akzeptiert wird - siehe `zwei_faktor_krypto.totp_code_pruefen`)
+    und aktualisiert bei Erfolg `letzter_zeitschritt`. Gibt
+    `(gueltig, technische_fehlermeldung_oder_None)` zurück - die
+    Fehlermeldung ist NUR bei einem technischen Problem (z. B. fehlender/
+    ungültiger Verschlüsselungsschlüssel) gesetzt, NIE bei einem einfach
+    falschen Code (dafür zeigen Aufrufer ihre eigene, kontextpassende
+    Meldung)."""
+    with _verbindung() as conn:
+        zeile = conn.execute(
+            "SELECT secret_verschluesselt, secret_key_version, letzter_zeitschritt "
+            "FROM zwei_faktor WHERE user_id = ? AND aktiv = 1",
+            (benutzer_id,),
+        ).fetchone()
+
+    if not zeile:
+        return False, "Zwei-Faktor-Authentifizierung ist für dieses Konto nicht aktiv."
+
+    try:
+        secret = zwei_faktor_krypto.secret_entschluesseln(
+            zeile["secret_verschluesselt"], zeile["secret_key_version"]
+        )
+    except RuntimeError:
+        return False, "2FA konnte technisch nicht geprüft werden. Bitte später erneut versuchen."
+
+    gueltig, zeitschritt = zwei_faktor_krypto.totp_code_pruefen(
+        secret, code, letzter_zeitschritt=zeile["letzter_zeitschritt"]
+    )
+
+    if gueltig:
+        with _verbindung() as conn:
+            conn.execute(
+                "UPDATE zwei_faktor SET letzter_zeitschritt = ? WHERE user_id = ?",
+                (zeitschritt, benutzer_id),
+            )
+
+    return gueltig, None
+
+
+def zwei_faktor_code_pruefen(benutzer_id, code, ist_backup_code):
+    """Vereinheitlichter Einstiegspunkt: prüft entweder einen TOTP- oder
+    einen Backup-Code gegen DIESEN Benutzer - genutzt sowohl von der
+    Login-Challenge (`zwei_faktor_challenge_pruefen_und_verbrauchen`) als
+    auch von jeder Re-Authentifizierung bei sicherheitskritischen
+    Kontoänderungen (2FA deaktivieren, Backup-Codes neu erzeugen, 2FA neu
+    einrichten, E-Mail ändern, Konto löschen - siehe `konto.py`). Gibt
+    `(gueltig, technische_fehlermeldung_oder_None)` zurück."""
+    if ist_backup_code:
+        return zwei_faktor_backup_code_pruefen_und_verbrauchen(benutzer_id, code), None
+
+    return zwei_faktor_totp_pruefen(benutzer_id, code)
+
+
+def zwei_faktor_deaktivieren(benutzer_id):
+    """Deaktiviert 2FA vollständig: entfernt das verschlüsselte Secret
+    (aktiv UND pending), setzt `aktiv = 0` und löscht ALLE Backup-Codes
+    dieses Benutzers. Ruft KEINE Sitzungs-Invalidierung auf - das
+    entscheidet die aufrufende UI (`konto.py`), die zusätzlich weiß,
+    welche Sitzung dabei ausgenommen werden soll."""
+    with _verbindung() as conn:
+        conn.execute(
+            "UPDATE zwei_faktor SET aktiv = 0, secret_verschluesselt = NULL, "
+            "secret_key_version = NULL, letzter_zeitschritt = NULL, "
+            "pending_secret_verschluesselt = NULL, pending_key_version = NULL, "
+            "pending_erstellt_am = NULL, aktiviert_am = NULL, aktualisiert_am = ? "
+            "WHERE user_id = ?",
+            (_jetzt(), benutzer_id),
+        )
+        conn.execute("DELETE FROM backup_codes WHERE user_id = ?", (benutzer_id,))
+
+
+def zwei_faktor_challenge_erstellen(benutzer_id):
+    """Erstellt eine neue serverseitige 2FA-Login-Challenge (NACH
+    erfolgreicher Passwortprüfung, VOR vollständiger Anmeldung) und gibt
+    ihren Klartext-Token zurück (gespeichert wird nur sein Hash, analog
+    zu Sitzungs-/Verifizierungs-Tokens). Zeitlich begrenzt gültig
+    (`ZWEI_FAKTOR_CHALLENGE_GUELTIGKEIT_MINUTEN`) und - über
+    `zwei_faktor_challenge_pruefen_und_verbrauchen` - einmalig verwendbar
+    sowie nach `ZWEI_FAKTOR_CHALLENGE_MAX_FEHLVERSUCHE` Fehlversuchen
+    endgültig ungültig."""
+    roher_token = secrets.token_urlsafe(32)
+    jetzt = _jetzt()
+    laeuft_ab = (
+        datetime.now() + timedelta(minutes=ZWEI_FAKTOR_CHALLENGE_GUELTIGKEIT_MINUTEN)
+    ).isoformat(timespec="seconds")
+
+    with _verbindung() as conn:
+        conn.execute(
+            "INSERT INTO zwei_faktor_challenges "
+            "(user_id, challenge_token_hash, erstellt_am, laeuft_ab_am) VALUES (?, ?, ?, ?)",
+            (benutzer_id, _token_hash(roher_token), jetzt, laeuft_ab),
+        )
+
+    return roher_token
+
+
+def zwei_faktor_challenge_pruefen_und_verbrauchen(roher_token, code, ist_backup_code):
+    """Prüft + verbraucht eine 2FA-Login-Challenge serverseitig - der
+    `benutzer_id`-Bezug kommt IMMER aus der Challenge-Zeile selbst (nie
+    aus einem Aufrufer-Parameter), ein manipulierter/geratener Token
+    findet dadurch bestenfalls gar keine Zeile, nie die eines fremden
+    Benutzers.
+
+    Gibt `(erfolg, meldung, benutzer_id_oder_None, challenge_beendet)`
+    zurück. `challenge_beendet=True` bedeutet: die Challenge ist (durch
+    Erfolg ODER zu viele Fehlversuche ODER Ablauf) nicht mehr benutzbar -
+    der Aufrufer MUSS den gemerkten Challenge-Token verwerfen und zu
+    einem normalen Login zurückkehren, ein erneuter Versuch mit
+    demselben Token liefert danach immer `erfolg=False` (Challenge nicht
+    gefunden), egal wie korrekt der Code ist.
+    """
+    token_hash = _token_hash(roher_token) if roher_token else None
+
+    with _verbindung() as conn:
+        zeile = conn.execute(
+            "SELECT id, user_id, laeuft_ab_am, fehlversuche FROM zwei_faktor_challenges "
+            "WHERE challenge_token_hash = ? AND verwendet_am IS NULL AND abgebrochen_am IS NULL",
+            (token_hash,),
+        ).fetchone()
+
+    if not zeile:
+        return False, "Diese Anmeldung ist nicht mehr gültig. Bitte melde dich erneut an.", None, True
+
+    if datetime.fromisoformat(zeile["laeuft_ab_am"]) < datetime.now():
+        with _verbindung() as conn:
+            conn.execute(
+                "UPDATE zwei_faktor_challenges SET abgebrochen_am = ? WHERE id = ?",
+                (_jetzt(), zeile["id"]),
+            )
+        return (
+            False,
+            "Die Anmeldung ist abgelaufen. Bitte melde dich erneut an.",
+            zeile["user_id"],
+            True,
+        )
+
+    benutzer_id = zeile["user_id"]
+    gueltig, _technische_meldung = zwei_faktor_code_pruefen(benutzer_id, code, ist_backup_code)
+
+    if gueltig:
+        with _verbindung() as conn:
+            conn.execute(
+                "UPDATE zwei_faktor_challenges SET verwendet_am = ? WHERE id = ?",
+                (_jetzt(), zeile["id"]),
+            )
+        return True, None, benutzer_id, True
+
+    neue_fehlversuche = zeile["fehlversuche"] + 1
+    challenge_beendet = neue_fehlversuche >= ZWEI_FAKTOR_CHALLENGE_MAX_FEHLVERSUCHE
+
+    with _verbindung() as conn:
+        if challenge_beendet:
+            conn.execute(
+                "UPDATE zwei_faktor_challenges SET fehlversuche = ?, abgebrochen_am = ? WHERE id = ?",
+                (neue_fehlversuche, _jetzt(), zeile["id"]),
+            )
+        else:
+            conn.execute(
+                "UPDATE zwei_faktor_challenges SET fehlversuche = ? WHERE id = ?",
+                (neue_fehlversuche, zeile["id"]),
+            )
+
+    if challenge_beendet:
+        return False, "Zu viele Fehlversuche. Bitte melde dich erneut an.", benutzer_id, True
+
+    return False, "Der eingegebene Code ist falsch.", benutzer_id, False

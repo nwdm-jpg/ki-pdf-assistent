@@ -43,6 +43,21 @@ _SESSION_KEY = "benutzer"
 _MODUS_KEY = "auth_modus"
 _SITZUNG_TOKEN_KEY = "_sitzung_token"
 
+# Zwei-Faktor-Login-Challenge (siehe `_login_versuchen`/`_2fa_challenge_formular`):
+# `_2FA_CHALLENGE_TOKEN_KEY` ist der einzige Ort, an dem der rohe
+# Challenge-Token dieses Laufs liegt - er trägt selbst KEINE
+# Berechtigung, jede Prüfung läuft über `speicher.zwei_faktor_challenge_pruefen_und_verbrauchen`
+# gegen die serverseitige Challenge-Zeile. `_2FA_BENUTZER_HINWEIS_KEY`
+# ist NICHT vertrauenswürdig für Auth-Entscheidungen (dient ausschließlich
+# als Rate-Limit-Schlüssel, damit wiederholte Fehlversuche über mehrere
+# Login-/Challenge-Zyklen desselben Kontos hinweg gezählt werden können,
+# statt bei jeder neuen Challenge bei null anzufangen) - die tatsächliche
+# `benutzer_id` einer erfolgreichen Anmeldung kommt IMMER aus der
+# Rückgabe von `speicher.zwei_faktor_challenge_pruefen_und_verbrauchen`.
+_2FA_CHALLENGE_TOKEN_KEY = "_2fa_challenge_token"
+_2FA_BENUTZER_HINWEIS_KEY = "_2fa_challenge_benutzer_hinweis"
+_2FA_BACKUP_MODUS_KEY = "_2fa_backup_modus"
+
 # Eigener, kleiner Bereich für unbestätigte Konten (siehe
 # `verifizierung_seite`/`web_app.py`s Zugriffsbeschränkung) - kein
 # Eintrag in der Haupt-Sidebar-Navigation für bereits bestätigte Konten.
@@ -134,6 +149,24 @@ def _sitzung_anmelden(benutzer_row):
     st.session_state[_SITZUNG_TOKEN_KEY] = speicher.sitzung_erstellen(benutzer_row["id"])
 
 
+def sitzung_neu_ausstellen(benutzer_id):
+    """Widerruft ALLE Sitzungen dieses Benutzers und stellt sofort eine
+    frische für DIESEN Tab neu aus - genutzt bei der 2FA-Deaktivierung
+    (`konto.py`): andere Geräte/Tabs müssen sich neu anmelden, aber die
+    Person, die die Deaktivierung gerade selbst durchgeführt hat, wird
+    dabei nicht aus ihrer eigenen, gerade aktiven Sitzung geworfen -
+    "aktuelle Session sicher behandeln / gegebenenfalls neu ausstellen"
+    (Aufgabenstellung). Erzeugt bewusst einen KOMPLETT neuen Sitzungs-
+    Token (kein Wiederverwenden) - dieselbe Session-Fixation-Vorsorge wie
+    bei jedem Login. Nur für den BEREITS angemeldeten Benutzer dieses
+    Laufs aufzurufen (`benutzer_id` muss `aktueller_benutzer_id()`
+    entsprechen) - ändert nur den Sitzungs-Token, nicht den restlichen
+    Sitzungszustand (Chat-Auswahl, aktiver Bereich etc. bleiben erhalten).
+    """
+    speicher.sitzungen_widerrufen_fuer_benutzer(benutzer_id)
+    st.session_state[_SITZUNG_TOKEN_KEY] = speicher.sitzung_erstellen(benutzer_id)
+
+
 def sitzung_email_verifiziert_setzen():
     """Markiert die aktuell angemeldete Sitzung als e-mail-bestätigt -
     NUR für den bereits angemeldeten Benutzer dieses Laufs (niemals für
@@ -202,17 +235,162 @@ def sitzung_felder_aktualisieren(**felder):
 
 
 def _login_versuchen(login_wert, passwort):
+    """Prüft Benutzername/E-Mail + Passwort. Gibt `(ergebnis, benutzer_id)`
+    zurück, `ergebnis` eines von:
+
+    - `"fehlgeschlagen"` - falsches Passwort/unbekanntes Konto.
+    - `"2fa_erforderlich"` - Passwort korrekt, aber 2FA ist aktiv: es wird
+      NOCH KEINE vollständige Sitzung erstellt (`ist_angemeldet()` bleibt
+      False), sondern nur eine serverseitige 2FA-Challenge (siehe
+      `speicher.zwei_faktor_challenge_erstellen`) - `web_app.py`s
+      Login-Schranke rendert dadurch weiterhin ausschließlich diese
+      Anmeldeseite (hier: den Challenge-Bildschirm), niemals die
+      Hauptanwendung, bis der zweite Faktor erfolgreich geprüft wurde.
+    - `"angemeldet"` - vollständig fertig (kein 2FA aktiv).
+    """
     benutzer = speicher.benutzer_nach_login(login_wert)
 
-    if benutzer and auth.passwort_pruefen(passwort, benutzer["passwort_hash"]):
-        _sitzung_anmelden(benutzer)
-        # Nur bei tatsächlich erfolgreichem Login, nicht bei jedem
-        # Skriptlauf - Grundlage für eine künftige Inaktivitäts-Richtlinie
-        # (siehe speicher.letzten_login_aktualisieren).
-        speicher.letzten_login_aktualisieren(benutzer["id"])
-        return True
+    if not (benutzer and auth.passwort_pruefen(passwort, benutzer["passwort_hash"])):
+        return "fehlgeschlagen", None
 
-    return False
+    status = speicher.zwei_faktor_status(benutzer["id"])
+
+    if status["aktiv"]:
+        challenge_token = speicher.zwei_faktor_challenge_erstellen(benutzer["id"])
+        st.session_state[_2FA_CHALLENGE_TOKEN_KEY] = challenge_token
+        st.session_state[_2FA_BENUTZER_HINWEIS_KEY] = benutzer["id"]
+        st.session_state.pop(_2FA_BACKUP_MODUS_KEY, None)
+        return "2fa_erforderlich", benutzer["id"]
+
+    _sitzung_anmelden(benutzer)
+    # Nur bei tatsächlich erfolgreichem (vollständigem) Login, nicht bei
+    # jedem Skriptlauf - Grundlage für eine künftige Inaktivitäts-
+    # Richtlinie (siehe speicher.letzten_login_aktualisieren).
+    speicher.letzten_login_aktualisieren(benutzer["id"])
+    return "angemeldet", benutzer["id"]
+
+
+def _2fa_challenge_verwerfen():
+    """Verwirft die aktuell laufende 2FA-Login-Challenge in diesem Tab
+    (client-seitiges Aufräumen) - der serverseitige Datensatz selbst
+    bleibt unangetastet (läuft eigenständig ab bzw. wurde bereits als
+    beendet markiert, siehe `speicher.zwei_faktor_challenge_pruefen_und_verbrauchen`).
+    Kehrt zur normalen Login-Ansicht zurück."""
+    st.session_state.pop(_2FA_CHALLENGE_TOKEN_KEY, None)
+    st.session_state.pop(_2FA_BENUTZER_HINWEIS_KEY, None)
+    st.session_state.pop(_2FA_BACKUP_MODUS_KEY, None)
+    st.session_state[_MODUS_KEY] = "login"
+
+
+def _2fa_challenge_formular():
+    """Rendert die 2FA-Login-Challenge - wird von `authentifizierung_anzeigen()`
+    MIT HÖCHSTER PRIORITÄT gerendert, solange ein Challenge-Token im
+    `st.session_state` liegt (noch vor jeder Prüfung von `_MODUS_KEY`) -
+    ein Klick auf "Registrieren"/"Passwort vergessen?" kann die laufende
+    Challenge dadurch NICHT umgehen, ohne sie zuvor explizit über
+    "Abbrechen" zu verwerfen. Die eigentliche Sicherheit hängt davon
+    aber ohnehin nicht ab: Selbst ein direkt (z. B. per Programmfehler)
+    gesetzter `_MODUS_KEY` würde keine Anmeldung bewirken, da
+    `ist_angemeldet()` erst nach erfolgreicher Prüfung durch
+    `speicher.zwei_faktor_challenge_pruefen_und_verbrauchen` True wird -
+    diese UI-Priorisierung ist zusätzliche Sorgfalt, keine alleinige
+    Schutzschicht (siehe CLAUDE.md "Streamlit-Sicherheit").
+    """
+    st.markdown("### Zwei-Faktor-Authentifizierung")
+
+    backup_modus = st.session_state.get(_2FA_BACKUP_MODUS_KEY, False)
+
+    if backup_modus:
+        st.caption("Gib einen deiner Backup-Codes ein.")
+    else:
+        st.caption("Gib den 6-stelligen Code aus deiner Authenticator-App ein.")
+
+    with st.form("2fa_challenge_formular"):
+        if backup_modus:
+            code = st.text_input("Backup-Code", placeholder="XXXXX-XXXXX")
+        else:
+            code = st.text_input("Authenticator-Code", placeholder="123456")
+
+        abgeschickt = st.form_submit_button("Bestätigen", type="primary", use_container_width=True)
+
+    if abgeschickt:
+        _2fa_challenge_verarbeiten(code, backup_modus)
+
+    spalte_umschalten, spalte_abbrechen = st.columns(2)
+
+    if spalte_umschalten.button(
+        "Backup-Code verwenden" if not backup_modus else "Authenticator-Code verwenden",
+        key="2fa_modus_umschalten",
+        use_container_width=True,
+    ):
+        st.session_state[_2FA_BACKUP_MODUS_KEY] = not backup_modus
+        st.rerun()
+
+    if spalte_abbrechen.button("Abbrechen", key="2fa_abbrechen", use_container_width=True):
+        _2fa_challenge_verwerfen()
+        st.rerun()
+
+
+def _2fa_challenge_verarbeiten(code, backup_modus):
+    challenge_token = st.session_state.get(_2FA_CHALLENGE_TOKEN_KEY)
+    hinweis_id = st.session_state.get(_2FA_BENUTZER_HINWEIS_KEY)
+    identitaet = f"user:{hinweis_id}" if hinweis_id else "2fa-unbekannt"
+    aktion = "backup_code_verify" if backup_modus else "totp_verify"
+
+    if not challenge_token:
+        st.error("Diese Anmeldung ist nicht mehr gültig. Bitte melde dich erneut an.")
+        _2fa_challenge_verwerfen()
+        return
+
+    if not code or not code.strip():
+        st.error("Bitte gib einen Code ein.")
+        return
+
+    erlaubt, wartezeit = ratenbegrenzung.pruefen(aktion, identitaet)
+
+    if not erlaubt:
+        sicherheitslog.protokollieren(
+            sicherheitslog.EREIGNIS_2FA_RATE_LIMITIERT, user_id=hinweis_id, detail=aktion
+        )
+        st.error(f"Zu viele Fehlversuche. Bitte versuche es in {_wartezeit_text(wartezeit)} erneut.")
+        return
+
+    erfolg, meldung, benutzer_id, beendet = speicher.zwei_faktor_challenge_pruefen_und_verbrauchen(
+        challenge_token, code, backup_modus
+    )
+    ratenbegrenzung.versuch_aufzeichnen(aktion, identitaet, erfolg)
+
+    if erfolg:
+        benutzer_row = speicher.benutzer_nach_id(benutzer_id)
+
+        if not benutzer_row:
+            st.error("Konto nicht gefunden.")
+            _2fa_challenge_verwerfen()
+            return
+
+        _sitzung_anmelden(benutzer_row)
+        speicher.letzten_login_aktualisieren(benutzer_id)
+        _2fa_challenge_verwerfen()
+
+        if backup_modus:
+            sicherheitslog.protokollieren(sicherheitslog.EREIGNIS_BACKUP_CODE_VERWENDET, user_id=benutzer_id)
+
+        sicherheitslog.protokollieren(sicherheitslog.EREIGNIS_2FA_LOGIN_ERFOLG, user_id=benutzer_id)
+        st.rerun()
+        return
+
+    sicherheitslog.protokollieren(
+        sicherheitslog.EREIGNIS_2FA_CHALLENGE_FEHLGESCHLAGEN,
+        user_id=benutzer_id or hinweis_id,
+        erfolgreich=False,
+    )
+
+    if beendet:
+        _2fa_challenge_verwerfen()
+        st.session_state["_2fa_beendet_hinweis"] = meldung
+        st.rerun()
+    else:
+        st.error(meldung)
 
 
 def _registrieren(benutzername, email, passwort, passwort_wiederholen):
@@ -361,21 +539,28 @@ def _login_formular():
                     f"Zu viele Anmeldeversuche. Bitte versuche es in "
                     f"{_wartezeit_text(wartezeit)} erneut."
                 )
-            elif _login_versuchen(login_wert, passwort):
-                sicherheitslog.protokollieren(
-                    sicherheitslog.EREIGNIS_LOGIN_ERFOLG,
-                    user_id=aktueller_benutzer_id(),
-                    identitaet=login_wert,
-                )
-                st.rerun()
             else:
-                ratenbegrenzung.versuch_aufzeichnen("login", login_wert, False)
-                sicherheitslog.protokollieren(
-                    sicherheitslog.EREIGNIS_LOGIN_FEHLGESCHLAGEN, identitaet=login_wert, erfolgreich=False
-                )
-                # Bewusst unspezifisch - verrät nicht, ob der Benutzername/die
-                # E-Mail überhaupt existiert.
-                st.error("Benutzername/E-Mail oder Passwort ist falsch.")
+                ergebnis, benutzer_id = _login_versuchen(login_wert, passwort)
+
+                if ergebnis == "angemeldet":
+                    sicherheitslog.protokollieren(
+                        sicherheitslog.EREIGNIS_LOGIN_ERFOLG, user_id=benutzer_id, identitaet=login_wert
+                    )
+                    st.rerun()
+                elif ergebnis == "2fa_erforderlich":
+                    # Passwort war korrekt - noch KEIN vollständiger Login
+                    # (siehe `_login_versuchen`), daher bewusst kein
+                    # `EREIGNIS_LOGIN_ERFOLG` hier; der endgültige Erfolg
+                    # wird erst in `_2fa_challenge_verarbeiten` protokolliert.
+                    st.rerun()
+                else:
+                    ratenbegrenzung.versuch_aufzeichnen("login", login_wert, False)
+                    sicherheitslog.protokollieren(
+                        sicherheitslog.EREIGNIS_LOGIN_FEHLGESCHLAGEN, identitaet=login_wert, erfolgreich=False
+                    )
+                    # Bewusst unspezifisch - verrät nicht, ob der Benutzername/die
+                    # E-Mail überhaupt existiert.
+                    st.error("Benutzername/E-Mail oder Passwort ist falsch.")
 
     spalte_register, spalte_vergessen = st.columns(2)
 
@@ -540,10 +725,23 @@ def authentifizierung_anzeigen():
         if st.session_state.pop("_sitzung_abgelaufen_hinweis", False):
             st.info("Deine Sitzung ist abgelaufen oder wurde beendet. Bitte melde dich erneut an.")
 
+        # Einmaliger Hinweis, wenn eine 2FA-Login-Challenge beendet wurde
+        # (Ablauf oder zu viele Fehlversuche, siehe `_2fa_challenge_verarbeiten`).
+        _2fa_hinweis = st.session_state.pop("_2fa_beendet_hinweis", None)
+        if _2fa_hinweis:
+            st.error(_2fa_hinweis)
+
         with st.container(border=True):
             modus = st.session_state.get(_MODUS_KEY, "login")
 
-            if modus == "register":
+            # Höchste Priorität: eine laufende 2FA-Challenge blockiert
+            # jede andere Ansicht (Registrieren/Passwort vergessen), bis
+            # sie explizit erfolgreich, abgelaufen, zu oft falsch
+            # beantwortet ODER über "Abbrechen" verworfen wurde - siehe
+            # `_2fa_challenge_formular`s Docstring.
+            if st.session_state.get(_2FA_CHALLENGE_TOKEN_KEY):
+                _2fa_challenge_formular()
+            elif modus == "register":
                 _register_formular()
             elif modus == "passwort_vergessen":
                 _passwort_vergessen_formular()

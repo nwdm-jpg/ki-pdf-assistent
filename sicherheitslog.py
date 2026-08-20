@@ -32,6 +32,19 @@ EREIGNIS_LOGOUT = "logout"
 EREIGNIS_SITZUNG_ABGELAUFEN = "session_invalidated"
 EREIGNIS_KONTO_GELOESCHT = "account_deleted"
 
+# Zwei-Faktor-Authentifizierung (TOTP, siehe `zwei_faktor_krypto.py`/
+# `speicher.py`s "Zwei-Faktor-Authentifizierung"-Abschnitt).
+EREIGNIS_2FA_SETUP_GESTARTET = "2fa_setup_started"
+EREIGNIS_2FA_AKTIVIERT = "2fa_enabled"
+EREIGNIS_2FA_SETUP_FEHLGESCHLAGEN = "2fa_setup_failed"
+EREIGNIS_2FA_CHALLENGE_FEHLGESCHLAGEN = "2fa_challenge_failed"
+EREIGNIS_2FA_LOGIN_ERFOLG = "2fa_login_success"
+EREIGNIS_BACKUP_CODE_VERWENDET = "backup_code_used"
+EREIGNIS_BACKUP_CODES_NEU_ERZEUGT = "backup_codes_regenerated"
+EREIGNIS_2FA_DEAKTIVIERT = "2fa_disabled"
+EREIGNIS_2FA_SECRET_ROTIERT = "2fa_secret_rotated"
+EREIGNIS_2FA_RATE_LIMITIERT = "2fa_rate_limited"
+
 
 def protokollieren(event_type, user_id=None, identitaet=None, ip=None, erfolgreich=True, detail=None):
     """Schreibt ein einzelnes Audit-Ereignis. `identitaet` wird - sofern

@@ -22,15 +22,21 @@ Streamlit-Skriptkontext ab und ist damit nicht sinnvoll ohne echten
 
 WICHTIG: Erzwingt `CLEVORIQ_EMAIL_PROVIDER=dev` VOR jedem Import, damit
 unter keinen Umständen ein echter Resend-Versand ausgelöst wird, egal
-was in der Shell-Umgebung sonst gesetzt ist. Jeder Test arbeitet auf
-einer frischen, temporären SQLite-Datenbank (kein Zugriff auf
-`app_daten/` des echten Projekts) und macht KEINE echten OpenAI- oder
-Resend-Aufrufe.
+was in der Shell-Umgebung sonst gesetzt ist. Setzt außerdem einen FEST
+DEFINIERTEN, NUR FÜR TESTS bestimmten `CLEVORIQ_2FA_ENCRYPTION_KEY`
+(`_TEST_2FA_SCHLUESSEL` unten - ein via `Fernet.generate_key()` erzeugter
+Platzhalter, kein irgendwo produktiv verwendetes Geheimnis) - ohne einen
+gültigen Schlüssel würde jede 2FA-Funktion, die ein Secret ver-/
+entschlüsselt, absichtlich mit einem `RuntimeError` fehlschlagen (siehe
+`zwei_faktor_krypto.py`). Jeder Test arbeitet auf einer frischen,
+temporären SQLite-Datenbank (kein Zugriff auf `app_daten/` des echten
+Projekts) und macht KEINE echten OpenAI- oder Resend-Aufrufe.
 """
 
 import os
 import shutil
 import tempfile
+import time
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -39,10 +45,37 @@ os.environ["CLEVORIQ_EMAIL_PROVIDER"] = "dev"
 os.environ.pop("AVENLOQ_EMAIL_PROVIDER", None)
 os.environ.pop("RESEND_API_KEY", None)
 
+# NUR für automatisierte Tests - ein via `Fernet.generate_key()` einmalig
+# erzeugter Platzhalterschlüssel, niemals in Produktion verwendet oder
+# irgendwo sonst referenziert. Siehe `zwei_faktor_krypto.py`s Docstring:
+# ohne gültigen `CLEVORIQ_2FA_ENCRYPTION_KEY` schlägt jede 2FA-Ver-/
+# Entschlüsselung sicher fehl statt auf einen Klartext-Fallback auszuweichen.
+_TEST_2FA_SCHLUESSEL = "yq3nD5wq0v1sO4kQe9ZfW2mC7bH8jU6xR1tL0nA5pY4="
+os.environ["CLEVORIQ_2FA_ENCRYPTION_KEY"] = _TEST_2FA_SCHLUESSEL
+os.environ.pop("CLEVORIQ_2FA_ENCRYPTION_KEY_V2", None)
+
 import auth  # noqa: E402
 import email_versand  # noqa: E402
+import pyotp  # noqa: E402
 import ratenbegrenzung  # noqa: E402
 import speicher  # noqa: E402
+import zwei_faktor_krypto  # noqa: E402
+
+
+def _naechster_totp_code(secret):
+    """Erzeugt einen TOTP-Code für den NÄCHSTEN Zeitschritt (jetzt + 30s).
+
+    `_2fa_aktivieren` verbraucht (korrekt, siehe Replay-Schutz) bereits
+    den Zeitschritt, in dem die Aktivierung stattfand - ein Test, der
+    Millisekunden später erneut `pyotp.TOTP(secret).now()` aufruft, würde
+    mit hoher Wahrscheinlichkeit denselben Zeitschritt treffen und vom
+    Replay-Schutz (korrekterweise!) abgelehnt werden. Diese Hilfsfunktion
+    erzeugt deterministisch einen Code für den EXAKT nächsten Zeitschritt
+    (Differenz von genau `TOTP_SCHRITT_SEKUNDEN`, unabhängig davon, wo
+    `jetzt` gerade innerhalb seines eigenen Zeitschritts liegt) und bleibt
+    dabei innerhalb des ±1-Toleranzfensters der eigentlichen Prüfung.
+    """
+    return pyotp.TOTP(secret).at(time.time() + zwei_faktor_krypto.TOTP_SCHRITT_SEKUNDEN)
 
 
 class _TempDbTestCase(unittest.TestCase):
@@ -62,6 +95,17 @@ class _TempDbTestCase(unittest.TestCase):
 
     def _neuer_benutzer(self, benutzername="testuser", email="test@example.com", passwort="Passwort123"):
         return speicher.benutzer_erstellen(benutzername, email, passwort)
+
+    def _2fa_aktivieren(self, benutzer_id):
+        """Durchläuft den vollständigen 2FA-Einrichtungsablauf (Setup
+        starten, mit einem echten, aktuell gültigen TOTP-Code bestätigen)
+        und gibt `(secret, backup_codes_klartext)` zurück - Hilfsfunktion
+        für Tests, die einen bereits aktivierten Zustand voraussetzen."""
+        secret, _uri = speicher.zwei_faktor_setup_starten(benutzer_id)
+        code = pyotp.TOTP(secret).now()
+        erfolg, meldung, backup_codes = speicher.zwei_faktor_setup_bestaetigen(benutzer_id, code)
+        assert erfolg, meldung
+        return secret, backup_codes
 
 
 # --- A/B: Registrierung + unverifizierter Ausgangszustand ---------------
@@ -550,6 +594,488 @@ class EmailVersandTests(unittest.TestCase):
     def test_reset_link_enthaelt_token(self):
         link = email_versand.reset_link("xyz789")
         self.assertIn("reset_token=xyz789", link)
+
+
+# --- Zwei-Faktor-Authentifizierung (TOTP) -----------------------------------
+#
+# Deckt die Buchstaben A-Z aus dem 2FA-Arbeitsblock ab, soweit an der
+# Streamlit-unabhängigen `speicher.py`/`zwei_faktor_krypto.py`-Schicht
+# sinnvoll testbar (siehe Moduldocstring). UI-getriebene Abläufe, die
+# zwingend mehrere Streamlit-Formulare in Reihenfolge durchlaufen (2FA
+# OHNE Passwort/ohne zweiten Faktor deaktivieren, Konto mit 2FA löschen),
+# werden zusätzlich per `streamlit.testing.v1.AppTest` geprüft (siehe
+# separates Live-UI-Testprotokoll im Abschlussbericht) - hier wird die
+# zugrunde liegende Invariante ("falsches Passwort/falscher Code lässt
+# die Aktion serverseitig nicht zu") direkt an der Datenschicht geprüft.
+
+
+class ZweiFaktorSetupTests(_TempDbTestCase):
+    def test_2fa_a_ohne_2fa_kein_zwang(self):
+        benutzer_id = self._neuer_benutzer()
+        status = speicher.zwei_faktor_status(benutzer_id)
+        self.assertFalse(status["aktiv"])
+
+    def test_2fa_b_setup_erstellt_pending(self):
+        benutzer_id = self._neuer_benutzer()
+        secret, uri = speicher.zwei_faktor_setup_starten(benutzer_id)
+
+        self.assertTrue(secret)
+        self.assertIn("otpauth://totp/", uri)
+        self.assertIn("Clevoriq", uri)
+
+        status = speicher.zwei_faktor_status(benutzer_id)
+        self.assertFalse(status["aktiv"])
+        self.assertTrue(status["pending"])
+
+    def test_2fa_c_falscher_setup_code_aktiviert_nicht(self):
+        benutzer_id = self._neuer_benutzer()
+        speicher.zwei_faktor_setup_starten(benutzer_id)
+
+        erfolg, meldung, backup_codes = speicher.zwei_faktor_setup_bestaetigen(benutzer_id, "000000")
+
+        self.assertFalse(erfolg)
+        self.assertIsNone(backup_codes)
+        self.assertFalse(speicher.zwei_faktor_status(benutzer_id)["aktiv"])
+
+    def test_2fa_d_korrekter_setup_code_aktiviert(self):
+        benutzer_id = self._neuer_benutzer()
+        secret, backup_codes = self._2fa_aktivieren(benutzer_id)
+
+        status = speicher.zwei_faktor_status(benutzer_id)
+        self.assertTrue(status["aktiv"])
+        self.assertFalse(status["pending"])
+        self.assertEqual(len(backup_codes), speicher.BACKUP_CODES_ANZAHL)
+
+    def test_2fa_e_secret_nicht_im_klartext_in_db(self):
+        benutzer_id = self._neuer_benutzer()
+        secret, _ = self._2fa_aktivieren(benutzer_id)
+
+        with speicher._verbindung() as conn:
+            zeile = conn.execute(
+                "SELECT secret_verschluesselt FROM zwei_faktor WHERE user_id = ?", (benutzer_id,)
+            ).fetchone()
+
+        self.assertIsNotNone(zeile["secret_verschluesselt"])
+        self.assertNotEqual(zeile["secret_verschluesselt"], secret)
+        self.assertNotIn(secret, zeile["secret_verschluesselt"])
+
+    def test_2fa_f_backup_codes_nur_gehasht_in_db(self):
+        benutzer_id = self._neuer_benutzer()
+        _secret, backup_codes = self._2fa_aktivieren(benutzer_id)
+
+        with speicher._verbindung() as conn:
+            zeilen = conn.execute(
+                "SELECT code_hash FROM backup_codes WHERE user_id = ?", (benutzer_id,)
+            ).fetchall()
+
+        gespeicherte_hashes = {z["code_hash"] for z in zeilen}
+        self.assertEqual(len(gespeicherte_hashes), len(backup_codes))
+
+        for klartext_code in backup_codes:
+            self.assertNotIn(klartext_code, gespeicherte_hashes)
+            normalisiert = zwei_faktor_krypto.backup_code_normalisieren(klartext_code)
+            self.assertIn(speicher._token_hash(normalisiert), gespeicherte_hashes)
+
+    def test_2fa_pending_secret_laesst_aktives_secret_unangetastet(self):
+        """Eine Neu-Einrichtung (Rotation) darf das noch aktive Secret
+        NICHT vorzeitig zerstören, bevor der neue Code bestätigt wurde."""
+        benutzer_id = self._neuer_benutzer()
+        altes_secret, _ = self._2fa_aktivieren(benutzer_id)
+
+        neues_secret, _uri = speicher.zwei_faktor_setup_starten(benutzer_id)
+        self.assertNotEqual(altes_secret, neues_secret)
+
+        # Das ALTE Secret muss weiterhin funktionieren, solange die neue
+        # Einrichtung nicht bestätigt wurde.
+        alter_code = _naechster_totp_code(altes_secret)
+        gueltig, _meldung = speicher.zwei_faktor_totp_pruefen(benutzer_id, alter_code)
+        self.assertTrue(gueltig)
+
+
+class ZweiFaktorLoginChallengeTests(_TempDbTestCase):
+    def setUp(self):
+        super().setUp()
+        self.benutzer_id = self._neuer_benutzer()
+        self.secret, self.backup_codes = self._2fa_aktivieren(self.benutzer_id)
+
+    def test_2fa_g_challenge_erstellt_keine_sitzung(self):
+        """Simuliert den Zustand direkt nach korrektem Passwort, vor
+        Abschluss der 2FA-Prüfung: es darf noch KEINE Sitzung existieren."""
+        speicher.zwei_faktor_challenge_erstellen(self.benutzer_id)
+
+        with speicher._verbindung() as conn:
+            anzahl = conn.execute(
+                "SELECT COUNT(*) AS n FROM sessions WHERE user_id = ?", (self.benutzer_id,)
+            ).fetchone()["n"]
+
+        self.assertEqual(anzahl, 0)
+
+    def test_2fa_h_korrekter_totp_schliesst_challenge_ab(self):
+        token = speicher.zwei_faktor_challenge_erstellen(self.benutzer_id)
+        code = _naechster_totp_code(self.secret)
+
+        erfolg, meldung, benutzer_id, beendet = speicher.zwei_faktor_challenge_pruefen_und_verbrauchen(
+            token, code, False
+        )
+
+        self.assertTrue(erfolg)
+        self.assertTrue(beendet)
+        self.assertEqual(benutzer_id, self.benutzer_id)
+
+        # Danach kann (wie es benutzer.py tut) eine echte Sitzung erstellt werden.
+        sitzung_token = speicher.sitzung_erstellen(benutzer_id)
+        self.assertEqual(speicher.sitzung_pruefen_und_aktualisieren(sitzung_token), benutzer_id)
+
+    def test_2fa_i_falscher_totp_schliesst_nicht_ab(self):
+        token = speicher.zwei_faktor_challenge_erstellen(self.benutzer_id)
+
+        erfolg, meldung, benutzer_id, beendet = speicher.zwei_faktor_challenge_pruefen_und_verbrauchen(
+            token, "000000", False
+        )
+
+        self.assertFalse(erfolg)
+        self.assertFalse(beendet)  # erster Fehlversuch - Challenge lebt noch
+
+    def test_2fa_j_abgelaufene_challenge_nicht_verwendbar(self):
+        token = speicher.zwei_faktor_challenge_erstellen(self.benutzer_id)
+
+        with speicher._verbindung() as conn:
+            abgelaufen = (datetime.now() - timedelta(minutes=1)).isoformat(timespec="seconds")
+            conn.execute(
+                "UPDATE zwei_faktor_challenges SET laeuft_ab_am = ? WHERE challenge_token_hash = ?",
+                (abgelaufen, speicher._token_hash(token)),
+            )
+
+        code = pyotp.TOTP(self.secret).now()
+        erfolg, meldung, _benutzer_id, beendet = speicher.zwei_faktor_challenge_pruefen_und_verbrauchen(
+            token, code, False
+        )
+
+        self.assertFalse(erfolg)
+        self.assertTrue(beendet)
+        self.assertIn("abgelaufen", meldung)
+
+    def test_2fa_k_challenge_nur_einmal_verwendbar(self):
+        token = speicher.zwei_faktor_challenge_erstellen(self.benutzer_id)
+        code = _naechster_totp_code(self.secret)
+
+        erster, _, _, _ = speicher.zwei_faktor_challenge_pruefen_und_verbrauchen(token, code, False)
+        zweiter, meldung, _, beendet = speicher.zwei_faktor_challenge_pruefen_und_verbrauchen(
+            token, code, False
+        )
+
+        self.assertTrue(erster)
+        self.assertFalse(zweiter)
+        self.assertTrue(beendet)
+
+    def test_2fa_l_rate_limiting_bei_falschen_codes(self):
+        identitaet = f"user:{self.benutzer_id}"
+
+        for _ in range(5):
+            erlaubt, _ = ratenbegrenzung.pruefen("totp_verify", identitaet)
+            self.assertTrue(erlaubt)
+            ratenbegrenzung.versuch_aufzeichnen("totp_verify", identitaet, False)
+
+        erlaubt, wartezeit = ratenbegrenzung.pruefen("totp_verify", identitaet)
+        self.assertFalse(erlaubt)
+        self.assertGreater(wartezeit, 0)
+
+    def test_2fa_m_gueltiger_backup_code_funktioniert(self):
+        token = speicher.zwei_faktor_challenge_erstellen(self.benutzer_id)
+
+        erfolg, _meldung, benutzer_id, beendet = speicher.zwei_faktor_challenge_pruefen_und_verbrauchen(
+            token, self.backup_codes[0], True
+        )
+
+        self.assertTrue(erfolg)
+        self.assertTrue(beendet)
+        self.assertEqual(benutzer_id, self.benutzer_id)
+
+    def test_2fa_n_backup_code_nur_einmal_verwendbar(self):
+        code = self.backup_codes[0]
+
+        erster = speicher.zwei_faktor_backup_code_pruefen_und_verbrauchen(self.benutzer_id, code)
+        zweiter = speicher.zwei_faktor_backup_code_pruefen_und_verbrauchen(self.benutzer_id, code)
+
+        self.assertTrue(erster)
+        self.assertFalse(zweiter)
+
+    def test_challenge_beendet_sich_nach_max_fehlversuchen(self):
+        token = speicher.zwei_faktor_challenge_erstellen(self.benutzer_id)
+
+        for i in range(speicher.ZWEI_FAKTOR_CHALLENGE_MAX_FEHLVERSUCHE):
+            erfolg, _meldung, _uid, beendet = speicher.zwei_faktor_challenge_pruefen_und_verbrauchen(
+                token, "000000", False
+            )
+            self.assertFalse(erfolg)
+            erwartet_beendet = i == speicher.ZWEI_FAKTOR_CHALLENGE_MAX_FEHLVERSUCHE - 1
+            self.assertEqual(beendet, erwartet_beendet)
+
+        # Ein neuer Versuch mit demselben Token - selbst mit korrektem
+        # Code - funktioniert danach nicht mehr (Challenge tot).
+        code = pyotp.TOTP(self.secret).now()
+        erfolg, _meldung, _uid, _beendet = speicher.zwei_faktor_challenge_pruefen_und_verbrauchen(
+            token, code, False
+        )
+        self.assertFalse(erfolg)
+
+
+class PasswortResetUnd2faTests(_TempDbTestCase):
+    def test_2fa_o_passwort_reset_deaktiviert_2fa_nicht(self):
+        benutzer_id = self._neuer_benutzer()
+        self._2fa_aktivieren(benutzer_id)
+
+        token, _konto_email = speicher.passwort_reset_anfordern("test@example.com")
+        erfolg, _meldung, _uid = speicher.passwort_reset_einloesen(token, "NeuesPasswort1")
+
+        self.assertTrue(erfolg)
+        self.assertTrue(speicher.zwei_faktor_status(benutzer_id)["aktiv"])
+
+    def test_2fa_o_naechster_login_braucht_neues_passwort_und_2fa(self):
+        benutzer_id = self._neuer_benutzer()
+        secret, _codes = self._2fa_aktivieren(benutzer_id)
+
+        token, _ = speicher.passwort_reset_anfordern("test@example.com")
+        speicher.passwort_reset_einloesen(token, "NeuesPasswort1")
+
+        konto = speicher.benutzer_nach_login("testuser")
+        self.assertFalse(auth.passwort_pruefen("Passwort123", konto["passwort_hash"]))
+        self.assertTrue(auth.passwort_pruefen("NeuesPasswort1", konto["passwort_hash"]))
+        self.assertTrue(speicher.zwei_faktor_status(benutzer_id)["aktiv"])
+
+    def test_2fa_p_passwortaenderung_invalidiert_andere_sitzungen(self):
+        benutzer_id = self._neuer_benutzer()
+        self._2fa_aktivieren(benutzer_id)
+
+        aktuelle_sitzung = speicher.sitzung_erstellen(benutzer_id)
+        andere_sitzung = speicher.sitzung_erstellen(benutzer_id)
+
+        speicher.passwort_aendern(benutzer_id, "Passwort123", "NeuesPasswort1")
+        # Wie in konto.py: andere Sitzungen widerrufen, eigene ausgenommen.
+        speicher.sitzungen_widerrufen_fuer_benutzer(benutzer_id, ausser_roher_token=aktuelle_sitzung)
+
+        self.assertEqual(speicher.sitzung_pruefen_und_aktualisieren(aktuelle_sitzung), benutzer_id)
+        self.assertIsNone(speicher.sitzung_pruefen_und_aktualisieren(andere_sitzung))
+        # 2FA bleibt unberührt von einer reinen Passwortänderung.
+        self.assertTrue(speicher.zwei_faktor_status(benutzer_id)["aktiv"])
+
+
+class ZweiFaktorVerwaltungTests(_TempDbTestCase):
+    def test_2fa_q_deaktivierung_serverseitig_an_passwort_gebunden(self):
+        """Beweist die serverseitige Grundlage des in konto.py umgesetzten
+        Gates (Passwort wird VOR jedem Aufruf von `zwei_faktor_deaktivieren`
+        geprüft, siehe `konto._2fa_deaktivieren_ansicht`): ein falsches
+        Passwort wird von `konto_passwort_gueltig` zuverlässig abgelehnt."""
+        benutzer_id = self._neuer_benutzer()
+        self._2fa_aktivieren(benutzer_id)
+
+        self.assertFalse(speicher.konto_passwort_gueltig(benutzer_id, "FalschesPasswort1"))
+        self.assertTrue(speicher.zwei_faktor_status(benutzer_id)["aktiv"])
+
+    def test_2fa_r_deaktivierung_serverseitig_an_zweiten_faktor_gebunden(self):
+        """Beweist die serverseitige Grundlage des zweiten Teils desselben
+        Gates: ein falscher TOTP-/Backup-Code wird von
+        `zwei_faktor_code_pruefen` zuverlässig abgelehnt, unabhängig vom
+        (bereits separat geprüften) Passwort."""
+        benutzer_id = self._neuer_benutzer()
+        self._2fa_aktivieren(benutzer_id)
+
+        gueltig, _meldung = speicher.zwei_faktor_code_pruefen(benutzer_id, "000000", False)
+        self.assertFalse(gueltig)
+        self.assertTrue(speicher.zwei_faktor_status(benutzer_id)["aktiv"])
+
+    def test_2fa_s_korrekte_deaktivierung_entfernt_secret_und_codes(self):
+        benutzer_id = self._neuer_benutzer()
+        self._2fa_aktivieren(benutzer_id)
+
+        speicher.zwei_faktor_deaktivieren(benutzer_id)
+
+        status = speicher.zwei_faktor_status(benutzer_id)
+        self.assertFalse(status["aktiv"])
+        self.assertFalse(status["pending"])
+        self.assertEqual(speicher.zwei_faktor_backup_codes_anzahl_uebrig(benutzer_id), 0)
+
+        with speicher._verbindung() as conn:
+            zeile = conn.execute(
+                "SELECT secret_verschluesselt FROM zwei_faktor WHERE user_id = ?", (benutzer_id,)
+            ).fetchone()
+        self.assertIsNone(zeile["secret_verschluesselt"])
+
+    def test_2fa_t_neue_backup_codes_invalidieren_alte(self):
+        benutzer_id = self._neuer_benutzer()
+        _secret, alte_codes = self._2fa_aktivieren(benutzer_id)
+
+        neue_codes = speicher.zwei_faktor_backup_codes_neu_erzeugen(benutzer_id)
+
+        self.assertNotEqual(set(alte_codes), set(neue_codes))
+        self.assertFalse(
+            speicher.zwei_faktor_backup_code_pruefen_und_verbrauchen(benutzer_id, alte_codes[0])
+        )
+        self.assertTrue(
+            speicher.zwei_faktor_backup_code_pruefen_und_verbrauchen(benutzer_id, neue_codes[0])
+        )
+
+    def test_2fa_u_kontoloeschung_entfernt_2fa_daten(self):
+        benutzer_id = self._neuer_benutzer()
+        self._2fa_aktivieren(benutzer_id)
+
+        speicher.konto_endgueltig_loeschen(benutzer_id)
+
+        self.assertFalse(speicher.zwei_faktor_status(benutzer_id)["aktiv"])
+
+        with speicher._verbindung() as conn:
+            zwei_faktor_zeilen = conn.execute(
+                "SELECT COUNT(*) AS n FROM zwei_faktor WHERE user_id = ?", (benutzer_id,)
+            ).fetchone()["n"]
+            backup_code_zeilen = conn.execute(
+                "SELECT COUNT(*) AS n FROM backup_codes WHERE user_id = ?", (benutzer_id,)
+            ).fetchone()["n"]
+
+        self.assertEqual(zwei_faktor_zeilen, 0)
+        self.assertEqual(backup_code_zeilen, 0)
+
+    def test_2fa_v_fremder_benutzer_kann_2fa_daten_nicht_verwenden(self):
+        user_a = self._neuer_benutzer("user_a", "a@example.com", "PasswortA1")
+        user_b = self._neuer_benutzer("user_b", "b@example.com", "PasswortB1")
+        secret_a, backup_codes_a = self._2fa_aktivieren(user_a)
+
+        # B hat kein aktives 2FA - A's TOTP-Code gegen B geprüft schlägt fehl.
+        code_a = pyotp.TOTP(secret_a).now()
+        gueltig, meldung = speicher.zwei_faktor_totp_pruefen(user_b, code_a)
+        self.assertFalse(gueltig)
+        self.assertIn("nicht aktiv", meldung)
+
+        # A's Backup-Code gegen B geprüft schlägt ebenfalls fehl.
+        self.assertFalse(
+            speicher.zwei_faktor_backup_code_pruefen_und_verbrauchen(user_b, backup_codes_a[0])
+        )
+        # ... und wurde dadurch NICHT verbraucht - A kann ihn noch nutzen.
+        self.assertTrue(
+            speicher.zwei_faktor_backup_code_pruefen_und_verbrauchen(user_a, backup_codes_a[0])
+        )
+
+        # B (ohne eigenes 2FA) kann A's Konto nicht deaktivieren, indem B
+        # seine eigene `user_id` übergibt - es wirkt nur auf B's (nicht
+        # vorhandenen) Status, A bleibt aktiv.
+        speicher.zwei_faktor_deaktivieren(user_b)
+        self.assertTrue(speicher.zwei_faktor_status(user_a)["aktiv"])
+
+    def test_2fa_v_challenge_eines_benutzers_nicht_fuer_anderen_einloesbar(self):
+        user_a = self._neuer_benutzer("user_a", "a@example.com", "PasswortA1")
+        user_b = self._neuer_benutzer("user_b", "b@example.com", "PasswortB1")
+        secret_a, _codes_a = self._2fa_aktivieren(user_a)
+        secret_b, _codes_b = self._2fa_aktivieren(user_b)
+
+        token_a = speicher.zwei_faktor_challenge_erstellen(user_a)
+        code_b = pyotp.TOTP(secret_b).now()
+
+        # B's eigener, gültiger Code kann A's Challenge nicht einlösen -
+        # die Challenge prüft immer gegen IHREN EIGENEN user_id (A).
+        erfolg, _meldung, benutzer_id, _beendet = speicher.zwei_faktor_challenge_pruefen_und_verbrauchen(
+            token_a, code_b, False
+        )
+        self.assertFalse(erfolg)
+        self.assertEqual(benutzer_id, user_a)
+
+    def test_2fa_w_migration_zweimal_ohne_fehler(self):
+        benutzer_id = self._neuer_benutzer()
+        self._2fa_aktivieren(benutzer_id)
+
+        speicher.datenbank_initialisieren()
+        speicher.datenbank_initialisieren()
+
+        status = speicher.zwei_faktor_status(benutzer_id)
+        self.assertTrue(status["aktiv"])
+
+    def test_2fa_x_fehlender_schluessel_scheitert_sicher(self):
+        gesichert = os.environ.pop("CLEVORIQ_2FA_ENCRYPTION_KEY", None)
+        try:
+            with self.assertRaises(RuntimeError) as kontext:
+                zwei_faktor_krypto.secret_verschluesseln("EINGESETZTESSECRETXYZ")
+            self.assertIn("CLEVORIQ_2FA_ENCRYPTION_KEY", str(kontext.exception))
+        finally:
+            if gesichert is not None:
+                os.environ["CLEVORIQ_2FA_ENCRYPTION_KEY"] = gesichert
+
+    def test_2fa_x_ungueltiger_schluessel_scheitert_sicher(self):
+        gesichert = os.environ.get("CLEVORIQ_2FA_ENCRYPTION_KEY")
+        os.environ["CLEVORIQ_2FA_ENCRYPTION_KEY"] = "kein-gueltiger-fernet-schluessel"
+        try:
+            with self.assertRaises(RuntimeError):
+                zwei_faktor_krypto.secret_verschluesseln("EINGESETZTESSECRETXYZ")
+        finally:
+            os.environ["CLEVORIQ_2FA_ENCRYPTION_KEY"] = gesichert
+
+    def test_2fa_x_verifizierung_scheitert_sicher_ohne_klartext_fallback(self):
+        """Aktiviert 2FA MIT gültigem Schlüssel, entfernt ihn dann VOR der
+        eigentlichen Code-Prüfung - die Prüfung muss (fail-closed) `False`
+        mit einer TECHNISCHEN Meldung liefern, NIEMALS den Code stillschweigend
+        als gültig akzeptieren."""
+        benutzer_id = self._neuer_benutzer()
+        secret, _codes = self._2fa_aktivieren(benutzer_id)
+        code = pyotp.TOTP(secret).now()
+
+        gesichert = os.environ.pop("CLEVORIQ_2FA_ENCRYPTION_KEY", None)
+        try:
+            gueltig, meldung = speicher.zwei_faktor_totp_pruefen(benutzer_id, code)
+            self.assertFalse(gueltig)
+            self.assertTrue(meldung)
+        finally:
+            if gesichert is not None:
+                os.environ["CLEVORIQ_2FA_ENCRYPTION_KEY"] = gesichert
+
+    def test_2fa_y_secrets_und_codes_nicht_in_security_log(self):
+        benutzer_id = self._neuer_benutzer()
+        secret, backup_codes = self._2fa_aktivieren(benutzer_id)
+
+        token = speicher.zwei_faktor_challenge_erstellen(benutzer_id)
+        code = pyotp.TOTP(secret).now()
+        speicher.zwei_faktor_challenge_pruefen_und_verbrauchen(token, code, False)
+        speicher.zwei_faktor_backup_code_pruefen_und_verbrauchen(benutzer_id, backup_codes[1])
+
+        with speicher._verbindung() as conn:
+            zeilen = conn.execute(
+                "SELECT identitaet, detail FROM security_events"
+            ).fetchall()
+
+        verbotene_werte = [secret, code] + backup_codes
+        for zeile in zeilen:
+            for feld in ("identitaet", "detail"):
+                wert = zeile[feld]
+                if not wert:
+                    continue
+                for verboten in verbotene_werte:
+                    self.assertNotIn(verboten, wert)
+
+    def test_2fa_z_replay_schutz_verhindert_doppelte_verwendung(self):
+        benutzer_id = self._neuer_benutzer()
+        secret, _codes = self._2fa_aktivieren(benutzer_id)
+        code = _naechster_totp_code(secret)
+
+        erster_gueltig, _meldung = speicher.zwei_faktor_totp_pruefen(benutzer_id, code)
+        zweiter_gueltig, _meldung = speicher.zwei_faktor_totp_pruefen(benutzer_id, code)
+
+        self.assertTrue(erster_gueltig)
+        self.assertFalse(zweiter_gueltig)
+
+    def test_2fa_z_replay_schutz_erlaubt_spaeteren_neuen_zeitschritt(self):
+        secret = zwei_faktor_krypto.neues_totp_secret()
+        basis_zeit = time.time()
+
+        gueltig1, schritt1 = zwei_faktor_krypto.totp_code_pruefen(
+            secret, pyotp.TOTP(secret).at(basis_zeit), jetzt=basis_zeit
+        )
+        self.assertTrue(gueltig1)
+
+        spaetere_zeit = basis_zeit + zwei_faktor_krypto.TOTP_SCHRITT_SEKUNDEN
+        gueltig2, schritt2 = zwei_faktor_krypto.totp_code_pruefen(
+            secret,
+            pyotp.TOTP(secret).at(spaetere_zeit),
+            letzter_zeitschritt=schritt1,
+            jetzt=spaetere_zeit,
+        )
+        self.assertTrue(gueltig2)
+        self.assertGreater(schritt2, schritt1)
 
 
 if __name__ == "__main__":
