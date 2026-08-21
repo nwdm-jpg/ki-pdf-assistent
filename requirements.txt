@@ -10,3 +10,5 @@ pyotp
 cryptography
 qrcode
 Pillow
+boto3
+psycopg2-binary

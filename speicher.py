@@ -24,17 +24,17 @@ aber nicht darauf als einzige Schutzschicht).
 import hashlib
 import json
 import secrets
-import shutil
 import sqlite3
 import uuid
-from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import numpy as np
 
 import auth
+import db_backend
 import produkte
+import storage
 import zwei_faktor_krypto
 
 
@@ -102,22 +102,15 @@ MIGRATIONS_EMAIL = "altbestand@avenloq.local"
 MIGRATIONS_PASSWORT = "Altbestand123!"
 
 
-@contextmanager
 def _verbindung():
+    """Liefert eine Datenbankverbindung über die zentrale
+    `db_backend`-Abstraktion (siehe dortigen Moduldocstring) - für das
+    aktuell einzig unterstützte Backend `sqlite` (Standard) identisch
+    zum bisherigen, direkt hier implementierten Verbindungsaufbau,
+    lediglich nach `db_backend.sqlite_verbindung` verschoben, damit es
+    nur eine Implementierung gibt."""
     APP_DATEN_ORDNER.mkdir(exist_ok=True)
-
-    conn = sqlite3.connect(DB_PFAD)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-
-    try:
-        yield conn
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
+    return db_backend.verbindung(DB_PFAD)
 
 
 def _spalten_ergaenzen(conn, tabelle, spalten):
@@ -205,6 +198,7 @@ def _dokumente_tabelle_neu_aufbauen():
                 einheit_typ TEXT NOT NULL DEFAULT 'seite',
                 groesse_bytes INTEGER,
                 public_id TEXT,
+                storage_key TEXT,
                 UNIQUE(hash, user_id)
             )
             """
@@ -213,9 +207,9 @@ def _dokumente_tabelle_neu_aufbauen():
             """
             INSERT INTO dokumente
                 (id, user_id, dateiname, hash, seitenzahl, hochgeladen_am,
-                 dateityp, einheit_typ, groesse_bytes, public_id)
+                 dateityp, einheit_typ, groesse_bytes, public_id, storage_key)
             SELECT id, user_id, dateiname, hash, seitenzahl, hochgeladen_am,
-                   dateityp, einheit_typ, groesse_bytes, public_id
+                   dateityp, einheit_typ, groesse_bytes, public_id, storage_key
             FROM dokumente_migration_alt
             """
         )
@@ -464,6 +458,34 @@ def _dokumente_public_ids_ergaenzen(conn):
     )
 
 
+def _dokumente_storage_keys_ergaenzen(conn):
+    """Stattet jedes bestehende Dokument OHNE `storage_key` idempotent
+    mit einem Storage-Key aus, der auf seinen TATSÄCHLICHEN, bereits
+    bestehenden Ablageort abbildet (siehe CLAUDE.md "Storage-Key statt
+    öffentlicher Dateipfad").
+
+    WICHTIG: verschiebt KEINE Datei - Alt-Dokumente liegen bereits unter
+    `<APP_DATEN_ORDNER>/users/<user_id>/documents/<hash>.<dateityp>`
+    (siehe `_benutzer_dokumente_ordner`); der hier gesetzte Storage-Key
+    beschreibt exakt diesen Pfad relativ zu `APP_DATEN_ORDNER`, sodass
+    `LocalFileStorage` (Basisordner = `APP_DATEN_ORDNER`) die Datei ohne
+    jede Verschiebung wiederfindet. NEUE Dokumente bekommen ab
+    `dokument_speichern` einen andersartigen, feingranulareren Key
+    (`users/<user_id>/documents/<public_id>/original.<endung>`) - beide
+    Formen sind als reiner, opaker Wert in `storage_key` gleichermaßen
+    gültig, es muss nie ein einheitliches Format über alle Zeilen
+    hinweg herrschen.
+    """
+    zeilen = conn.execute(
+        "SELECT id, user_id, hash, dateityp FROM dokumente WHERE storage_key IS NULL"
+    ).fetchall()
+
+    for zeile in zeilen:
+        dateityp = zeile["dateityp"] or "pdf"
+        key = f"users/{zeile['user_id']}/documents/{zeile['hash']}.{dateityp}"
+        conn.execute("UPDATE dokumente SET storage_key = ? WHERE id = ?", (key, zeile["id"]))
+
+
 def _produktzugriffe_migrieren(conn):
     """Gewährt jedem bestehenden Benutzer OHNE Zugriffszeile automatisch
     aktiven Zugriff auf Clevoriq Documents (siehe CLAUDE.md "Produktsystem").
@@ -551,7 +573,25 @@ def datenbank_initialisieren():
     (7) Originaldateien in die Pro-Benutzer-Ordnerstruktur verschieben.
     Jeder Schritt ist für sich idempotent - beliebig oft ausführbar,
     ohne bestehende Daten zu verlieren oder zu duplizieren.
+
+    Unterstützt aktuell AUSSCHLIESSLICH das Backend `sqlite` - alle
+    Schema-/Migrationsschritte hier (`PRAGMA`, `ALTER TABLE ... RENAME
+    TO`, `INSERT OR IGNORE`, ...) sind SQLite-spezifisch (siehe
+    `db_backend.py`s Moduldocstring für den genauen Umfang der
+    DB-Abstraktion in diesem Block). `CLEVORIQ_DATABASE_BACKEND=postgresql`
+    scheitert deshalb hier bewusst früh und klar, statt mit einer
+    SQL-Syntaxfehlermeldung mitten in der Migration.
     """
+    if db_backend.aktuelles_backend() != db_backend.BACKEND_SQLITE:
+        raise NotImplementedError(
+            "PostgreSQL wird als Datenbank-Backend vorbereitet (Verbindungsaufbau, "
+            "Konfiguration über CLEVORIQ_DATABASE_URL - siehe db_backend.py), aber "
+            "das SQL-Schema und alle Abfragen in speicher.py sind aktuell noch "
+            "SQLite-spezifisch. Die vollständige Portierung ist für den nächsten "
+            "Architekturblock vorgesehen. Setze CLEVORIQ_DATABASE_BACKEND=sqlite "
+            "(Standard), um Clevoriq weiter zu betreiben."
+        )
+
     with _verbindung() as conn:
         conn.executescript(
             """
@@ -578,6 +618,7 @@ def datenbank_initialisieren():
                 dateityp TEXT NOT NULL DEFAULT 'pdf',
                 einheit_typ TEXT NOT NULL DEFAULT 'seite',
                 groesse_bytes INTEGER,
+                storage_key TEXT,
                 UNIQUE(hash, user_id)
             );
 
@@ -734,6 +775,7 @@ def datenbank_initialisieren():
                 ("groesse_bytes", "INTEGER"),
                 ("user_id", "INTEGER REFERENCES benutzer(id)"),
                 ("public_id", "TEXT"),
+                ("storage_key", "TEXT"),
             ],
         )
         _spalten_ergaenzen(
@@ -754,6 +796,7 @@ def datenbank_initialisieren():
 
         _migration_bestandsdaten_zuweisen(conn)
         _dokumente_public_ids_ergaenzen(conn)
+        _dokumente_storage_keys_ergaenzen(conn)
         _produktzugriffe_migrieren(conn)
         muss_dokumente_neu_aufbauen = not _dokumente_tabelle_pro_benutzer_eindeutig(conn)
 
@@ -1399,21 +1442,21 @@ def konto_endgueltig_loeschen(benutzer_id):
     statt verwaist referenziert zu werden.
 
     Gibt `None` bei vollem Erfolg zurück, sonst eine Fehlermeldung zur
-    (unvollständigen) Dateisystem-Bereinigung - das Konto selbst ist in
+    (unvollständigen) Objekt-Bereinigung - das Konto selbst ist in
     jedem Fall bereits gelöscht (kein Login mehr möglich, keine
     hängenden Fremdschlüssel in der Datenbank).
     """
     with _verbindung() as conn:
         conn.execute("DELETE FROM benutzer WHERE id = ?", (benutzer_id,))
 
-    benutzer_ordner = BENUTZER_ORDNER / str(int(benutzer_id))
-
-    if not benutzer_ordner.exists():
-        return None
-
     try:
-        shutil.rmtree(benutzer_ordner)
-    except OSError as fehler:
+        # Löscht ALLE Storage-Objekte dieses Benutzers über den
+        # Storage-Layer (siehe `storage.py`) statt direkt `shutil.rmtree`
+        # aufzurufen - funktioniert unverändert für `LocalFileStorage`
+        # UND (vorbereitet, noch nicht produktiv genutzt) für ein
+        # künftiges `S3Storage`-Backend.
+        _storage().praefix_loeschen(f"users/{int(benutzer_id)}/")
+    except storage.StorageFehler as fehler:
         return str(fehler)
 
     return None
@@ -1423,29 +1466,37 @@ def dokument_datei_lesen(dokument_id, benutzer_id):
     """Liest die Original-Datei eines Dokuments als Bytes, NUR wenn es
     tatsächlich diesem Benutzer gehört (sonst `None`) - genutzt vom
     Datenexport (`datenexport.py`), damit dessen ZIP-Aufbau nie selbst
-    einen Dateipfad aus einer möglicherweise fremden `dokument_id`
+    einen Storage-Zugriff aus einer möglicherweise fremden `dokument_id`
     konstruieren muss, sondern die Eigentümerprüfung immer über diese
-    Funktion läuft.
+    Funktion läuft. Liest über den zentralen Storage-Layer (`storage.py`)
+    statt einen lokalen Dateipfad vorauszusetzen.
     """
     with _verbindung() as conn:
         zeile = conn.execute(
-            "SELECT hash, dateityp FROM dokumente WHERE id = ? AND user_id = ?",
+            "SELECT storage_key FROM dokumente WHERE id = ? AND user_id = ?",
             (dokument_id, benutzer_id),
         ).fetchone()
 
-    if not zeile:
+    if not zeile or not zeile["storage_key"]:
         return None
 
-    dateityp = zeile["dateityp"] or "pdf"
-    pfad = _benutzer_dokumente_ordner(benutzer_id) / f"{zeile['hash']}.{dateityp}"
-
-    if not pfad.exists():
+    try:
+        return _storage().lesen(zeile["storage_key"])
+    except storage.StorageFehler:
         return None
-
-    return pfad.read_bytes()
 
 
 # --- Dokumentbibliothek ---
+
+
+def _storage():
+    """Liefert den aktuell konfigurierten Storage-Layer (siehe `storage.py`)
+    - FRISCH bei jedem Aufruf statt einmalig gecacht, damit Tests, die
+    `APP_DATEN_ORDNER` auf ein temporäres Verzeichnis umleiten (siehe
+    `test_hub_produkte.py`s `_TempDbTestCase`), automatisch auch den
+    Storage-Layer mit umleiten. `APP_DATEN_ORDNER` ist nur für Backend
+    `local` relevant (siehe `storage.storage_backend`)."""
+    return storage.storage_backend(APP_DATEN_ORDNER)
 
 
 def _benutzer_dokumente_ordner(benutzer_id):
@@ -1454,7 +1505,10 @@ def _benutzer_dokumente_ordner(benutzer_id):
     `benutzer_id` ist immer eine interne Ganzzahl aus der eigenen
     Datenbank (nie ein von außen übergebener String) - der Pfad ist
     dadurch inhärent sicher vor Path-Traversal, ganz ohne zusätzliche
-    Sanitisierung des Wertes selbst.
+    Sanitisierung des Wertes selbst. Wird nur noch von der
+    (ausschließlich lokalen, dateisystembasierten) Alt-Migration
+    `_dateien_migrieren` verwendet - der eigentliche Lese-/Schreib-/
+    Löschpfad für Dokumente läuft über `_storage()`/`storage.py`.
     """
     ordner = BENUTZER_ORDNER / str(int(benutzer_id)) / "documents"
     ordner.mkdir(parents=True, exist_ok=True)
@@ -1488,31 +1542,57 @@ def dokument_speichern(dateiname, hash_wert, datei_bytes, einheiten_anzahl, date
     `einheiten_anzahl`/`einheit_typ` sind formatunabhängig zu verstehen:
     Seiten bei PDF, Folien bei PPTX, Tabellenblätter bei XLSX,
     Abschnitte bei DOCX/TXT/MD/CSV (siehe `dokument_verarbeitung.py`).
-    Die Originaldatei landet ausschließlich im Ordner dieses Benutzers
-    (`_benutzer_dokumente_ordner`), benannt nach Hash + Dateityp - nie
-    nach dem (nutzergesteuerten) Original-Dateinamen.
-    """
-    with _verbindung() as conn:
-        cursor = conn.execute(
-            "INSERT INTO dokumente "
-            "(user_id, dateiname, hash, seitenzahl, hochgeladen_am, dateityp, einheit_typ, "
-            "groesse_bytes, public_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                benutzer_id,
-                dateiname,
-                hash_wert,
-                einheiten_anzahl,
-                _jetzt(),
-                dateityp,
-                einheit_typ,
-                len(datei_bytes),
-                str(uuid.uuid4()),
-            ),
-        )
-        dokument_id = cursor.lastrowid
 
-    (_benutzer_dokumente_ordner(benutzer_id) / f"{hash_wert}.{dateityp}").write_bytes(datei_bytes)
+    Der `storage_key` (siehe CLAUDE.md "Storage-Key statt öffentlicher
+    Dateipfad") wird ausschließlich serverseitig aus `benutzer_id` +
+    der neu erzeugten `public_id` gebildet - NIE aus dem (nutzergesteuerten)
+    Original-Dateinamen `dateiname`, der ausschließlich als Anzeige-Metadatum
+    in der DB landet.
+
+    Upload-Konsistenz (siehe CLAUDE.md "Upload-Konsistenz"): die
+    Storage-Datei wird ZUERST geschrieben, danach erst die DB-Zeile
+    angelegt. Schlägt der Storage-Schreibvorgang fehl, existiert gar
+    keine DB-Zeile (keine "Zeile ohne Datei"). Schlägt umgekehrt der
+    DB-Insert fehl (z. B. eine unerwartete Ausnahme), wird das bereits
+    geschriebene Storage-Objekt wieder gelöscht (Kompensation), bevor
+    die Ausnahme weitergereicht wird - keine dauerhaft verwaiste Datei.
+    """
+    dokument_public_id = str(uuid.uuid4())
+    storage_key = f"users/{benutzer_id}/documents/{dokument_public_id}/original.{dateityp}"
+    storage_backend = _storage()
+
+    storage_backend.speichern(storage_key, datei_bytes)
+
+    try:
+        with _verbindung() as conn:
+            cursor = conn.execute(
+                "INSERT INTO dokumente "
+                "(user_id, dateiname, hash, seitenzahl, hochgeladen_am, dateityp, einheit_typ, "
+                "groesse_bytes, public_id, storage_key) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    benutzer_id,
+                    dateiname,
+                    hash_wert,
+                    einheiten_anzahl,
+                    _jetzt(),
+                    dateityp,
+                    einheit_typ,
+                    len(datei_bytes),
+                    dokument_public_id,
+                    storage_key,
+                ),
+            )
+            dokument_id = cursor.lastrowid
+    except Exception:
+        try:
+            storage_backend.loeschen(storage_key)
+        except storage.StorageFehler:
+            # Bestmögliche Kompensation - ein sekundärer Storage-Fehler
+            # beim Aufräumen darf die eigentliche (aussagekräftigere)
+            # DB-Ausnahme nicht verdecken.
+            pass
+        raise
 
     return dokument_id
 
@@ -1568,7 +1648,7 @@ def dokument_loeschen(dokument_id, benutzer_id):
     """
     with _verbindung() as conn:
         zeile = conn.execute(
-            "SELECT hash, dateityp FROM dokumente WHERE id = ? AND user_id = ?",
+            "SELECT storage_key FROM dokumente WHERE id = ? AND user_id = ?",
             (dokument_id, benutzer_id),
         ).fetchone()
 
@@ -1589,8 +1669,16 @@ def dokument_loeschen(dokument_id, benutzer_id):
                     (json.dumps(bereinigte_ids), chat_zeile["id"]),
                 )
 
-    dateityp = zeile["dateityp"] or "pdf"
-    (_benutzer_dokumente_ordner(benutzer_id) / f"{zeile['hash']}.{dateityp}").unlink(missing_ok=True)
+    if zeile["storage_key"]:
+        try:
+            _storage().loeschen(zeile["storage_key"])
+        except storage.StorageFehler:
+            # Die DB-Zeile (die Quelle der Wahrheit für den Benutzer) ist
+            # bereits weg - ein Storage-Fehler hier darf das Löschen aus
+            # der Bibliothek nicht rückgängig machen. Im schlimmsten Fall
+            # bleibt ein für den Benutzer nicht mehr sichtbares, verwaistes
+            # Objekt zurück (siehe CLAUDE.md "bekannte Einschränkungen").
+            pass
 
 
 def dokument_nach_public_id(public_id, benutzer_id):
