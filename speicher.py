@@ -1873,8 +1873,9 @@ def zwei_faktor_backup_codes_neu_erzeugen(benutzer_id):
     ALLE bisherigen Codes dieses Benutzers sofort ungültig (harte
     Ersetzung, kein Anhängen). Gibt die neuen Codes im KLARTEXT zurück -
     einzige Gelegenheit, sie zu sehen; gespeichert werden ausschließlich
-    ihre Hashes (`_token_hash`, derselbe SHA-256 wie für andere
-    hoch-entropische Zufalls-Token dieser App)."""
+    ihre Hashes (`auth.backup_code_hash` - gesalzenes Argon2id, dieselbe
+    Konfiguration wie für Passwörter, da ein Backup-Code genau wie ein
+    Passwort ein authentifizierungsrelevantes Geheimnis ist)."""
     klartext_codes = zwei_faktor_krypto.backup_codes_erzeugen(BACKUP_CODES_ANZAHL)
     jetzt = _jetzt()
 
@@ -1883,7 +1884,11 @@ def zwei_faktor_backup_codes_neu_erzeugen(benutzer_id):
         conn.executemany(
             "INSERT INTO backup_codes (user_id, code_hash, erstellt_am) VALUES (?, ?, ?)",
             [
-                (benutzer_id, _token_hash(zwei_faktor_krypto.backup_code_normalisieren(code)), jetzt)
+                (
+                    benutzer_id,
+                    auth.backup_code_hash(zwei_faktor_krypto.backup_code_normalisieren(code)),
+                    jetzt,
+                )
                 for code in klartext_codes
             ],
         )
@@ -1905,26 +1910,37 @@ def zwei_faktor_backup_codes_anzahl_uebrig(benutzer_id):
 
 
 def zwei_faktor_backup_code_pruefen_und_verbrauchen(benutzer_id, code):
-    """Prüft einen Backup-Code gegen die gespeicherten Hashes DIESES
-    Benutzers und markiert ihn bei Erfolg SOFORT als verbraucht (einmalig
-    verwendbar). Gibt `True`/`False` zurück."""
+    """Prüft einen Backup-Code gegen die gespeicherten Argon2id-Hashes
+    DIESES Benutzers und markiert ihn bei Erfolg SOFORT als verbraucht
+    (einmalig verwendbar). Gibt `True`/`False` zurück.
+
+    Da Argon2id-Hashes gesalzen sind (anders als der einfache SHA-256 für
+    hochentropische Tokens), ist kein direkter `WHERE code_hash = ?`-
+    Abgleich mehr möglich - stattdessen werden alle noch unverbrauchten
+    Codes dieses Benutzers geladen und `code` wird gegen jeden einzeln
+    mit `auth.backup_code_pruefen` verifiziert. Das ist bei maximal
+    `BACKUP_CODES_ANZAHL` (10) Zeilen unproblematisch."""
     normalisiert = zwei_faktor_krypto.backup_code_normalisieren(code)
 
     if not normalisiert:
         return False
 
-    code_hash = _token_hash(normalisiert)
-
     with _verbindung() as conn:
-        zeile = conn.execute(
-            "SELECT id FROM backup_codes WHERE user_id = ? AND code_hash = ? AND verwendet_am IS NULL",
-            (benutzer_id, code_hash),
-        ).fetchone()
+        zeilen = conn.execute(
+            "SELECT id, code_hash FROM backup_codes WHERE user_id = ? AND verwendet_am IS NULL",
+            (benutzer_id,),
+        ).fetchall()
 
-        if not zeile:
+        treffer_id = None
+        for zeile in zeilen:
+            if auth.backup_code_pruefen(normalisiert, zeile["code_hash"]):
+                treffer_id = zeile["id"]
+                break
+
+        if treffer_id is None:
             return False
 
-        conn.execute("UPDATE backup_codes SET verwendet_am = ? WHERE id = ?", (_jetzt(), zeile["id"]))
+        conn.execute("UPDATE backup_codes SET verwendet_am = ? WHERE id = ?", (_jetzt(), treffer_id))
 
     return True
 

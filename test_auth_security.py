@@ -674,7 +674,34 @@ class ZweiFaktorSetupTests(_TempDbTestCase):
         for klartext_code in backup_codes:
             self.assertNotIn(klartext_code, gespeicherte_hashes)
             normalisiert = zwei_faktor_krypto.backup_code_normalisieren(klartext_code)
-            self.assertIn(speicher._token_hash(normalisiert), gespeicherte_hashes)
+            # Argon2id ist gesalzen - jeder Klartext-Code muss gegen GENAU
+            # einen der gespeicherten Hashes verifizieren, kein direkter
+            # String-Vergleich (wie beim alten, ungesalzenen SHA-256) mehr
+            # möglich.
+            treffer = [h for h in gespeicherte_hashes if auth.backup_code_pruefen(normalisiert, h)]
+            self.assertEqual(len(treffer), 1)
+
+    def test_2fa_f2_backup_codes_kein_klartext_sha256_hash(self):
+        """Stellt sicher, dass Backup-Codes NICHT mehr als einfacher,
+        ungesalzener SHA-256-Hash (die alte, zu schwache Implementierung)
+        gespeichert werden, sondern als gesalzener Argon2id-Hash (erkennbar
+        am `$argon2id$`-Präfix des Standard-PHC-Encodings)."""
+        benutzer_id = self._neuer_benutzer()
+        _secret, backup_codes = self._2fa_aktivieren(benutzer_id)
+
+        with speicher._verbindung() as conn:
+            zeilen = conn.execute(
+                "SELECT code_hash FROM backup_codes WHERE user_id = ?", (benutzer_id,)
+            ).fetchall()
+
+        for zeile in zeilen:
+            code_hash = zeile["code_hash"]
+            self.assertTrue(code_hash.startswith("$argon2id$"))
+
+        for klartext_code in backup_codes:
+            normalisiert = zwei_faktor_krypto.backup_code_normalisieren(klartext_code)
+            alter_sha256_hash = speicher._token_hash(normalisiert)
+            self.assertNotIn(alter_sha256_hash, {z["code_hash"] for z in zeilen})
 
     def test_2fa_pending_secret_laesst_aktives_secret_unangetastet(self):
         """Eine Neu-Einrichtung (Rotation) darf das noch aktive Secret

@@ -60,6 +60,32 @@ def passwort_pruefen(passwort, gespeicherter_hash):
         return False
 
 
+def backup_code_hash(code):
+    """Erzeugt einen Argon2-Hash für einen 2FA-Backup-Code.
+
+    Nutzt bewusst dieselbe `PasswordHasher`-Instanz (also dieselbe
+    Argon2id-Parametrisierung) wie `passwort_hash` - ein Backup-Code ist
+    genau wie ein Passwort ein authentifizierungsrelevantes Geheimnis
+    (im Gegensatz zu den bereits selbst hochentropischen, zufällig
+    erzeugten Tokens, für die `speicher._token_hash`s einfacher,
+    ungesalzener SHA-256 ausreicht), verdient also denselben
+    speicher-/CPU-harten, gesalzenen Schutz gegen Offline-Angriffe.
+    """
+    return _ph.hash(code)
+
+
+def backup_code_pruefen(code, gespeicherter_hash):
+    """Prüft einen Backup-Code gegen einen gespeicherten Argon2-Hash.
+
+    Gibt bei jedem Fehler (falscher Code, beschädigter/fremder Hash)
+    einheitlich `False` zurück - siehe `passwort_pruefen`.
+    """
+    try:
+        return _ph.verify(gespeicherter_hash, code)
+    except (VerifyMismatchError, VerificationError, InvalidHash):
+        return False
+
+
 def email_gueltig(email):
     """Einfache, formale E-Mail-Prüfung (kein Versand/DNS-Check)."""
     return bool(_EMAIL_MUSTER.match((email or "").strip()))
