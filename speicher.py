@@ -116,16 +116,16 @@ def _verbindung():
 def _spalten_ergaenzen(conn, tabelle, spalten):
     """Fügt fehlender Tabelle fehlende Spalten additiv hinzu (Migration).
 
-    Prüft je Spalte per `PRAGMA table_info`, ob sie bereits existiert,
-    bevor `ALTER TABLE ... ADD COLUMN` ausgeführt wird. Rein additiv und
-    beliebig oft ausführbar - bestehende Datenbanken (inkl. aller
-    vorhandenen Zeilen) bleiben beim Start einer neueren App-Version
-    unangetastet, es werden nur fehlende Spalten mit Default-Werten
-    ergänzt.
+    Prüft je Spalte dialektabhängig (siehe `db_backend.spalten_vorhanden`
+    - `PRAGMA table_info` unter SQLite, `information_schema.columns`
+    unter PostgreSQL), ob sie bereits existiert, bevor `ALTER TABLE ...
+    ADD COLUMN` ausgeführt wird (identische Syntax auf beiden Backends).
+    Rein additiv und beliebig oft ausführbar - bestehende Datenbanken
+    (inkl. aller vorhandenen Zeilen) bleiben beim Start einer neueren
+    App-Version unangetastet, es werden nur fehlende Spalten mit
+    Default-Werten ergänzt.
     """
-    vorhandene_spalten = {
-        zeile["name"] for zeile in conn.execute(f"PRAGMA table_info({tabelle})")
-    }
+    vorhandene_spalten = db_backend.spalten_vorhanden(conn, tabelle)
 
     for spalte, definition in spalten:
         if spalte not in vorhandene_spalten:
@@ -393,7 +393,8 @@ def _migrations_benutzer_id(conn):
         return zeile["id"]
 
     jetzt = _jetzt()
-    cursor = conn.execute(
+    return db_backend.insert_und_id_zurueckgeben(
+        conn,
         "INSERT INTO benutzer (benutzername, email, passwort_hash, erstellt_am, aktualisiert_am, aktiv) "
         "VALUES (?, ?, ?, ?, ?, 1)",
         (
@@ -404,7 +405,6 @@ def _migrations_benutzer_id(conn):
             jetzt,
         ),
     )
-    return cursor.lastrowid
 
 
 def _migration_bestandsdaten_zuweisen(conn):
@@ -556,196 +556,222 @@ def _dateien_migrieren():
         pass
 
 
+def _schema_sql():
+    """Baut das vollständige Schema-Skript für das AKTUELL konfigurierte
+    Backend aus EINER gemeinsamen Vorlage (`_SCHEMA_VORLAGE`) - siehe
+    CLAUDE.md "Schema für beide Backends". Die beiden Dialekte
+    unterscheiden sich nur in zwei Punkten, beide über einfache
+    Platzhalter-Ersetzung gelöst:
+
+    - Primärschlüssel mit Autoinkrement: `INTEGER PRIMARY KEY
+      AUTOINCREMENT` (SQLite) vs. `SERIAL PRIMARY KEY` (PostgreSQL).
+      NICHT betroffen ist `zwei_faktor.user_id`, dessen Primärschlüssel
+      bewusst KEIN eigener Autoinkrement-Wert ist, sondern der fremde
+      `benutzer.id`-Wert selbst - diese Zeile bleibt in der Vorlage
+      absichtlich literal `user_id INTEGER PRIMARY KEY REFERENCES ...`
+      und wird NICHT über `{PK}` ersetzt.
+    - Binärdaten (Chunk-Embeddings): `BLOB` (SQLite) vs. `BYTEA`
+      (PostgreSQL).
+
+    Alles andere (Spaltentypen, `UNIQUE`/`REFERENCES ... ON DELETE
+    CASCADE`, `CREATE INDEX IF NOT EXISTS`, auch der partielle Unique-
+    Index in `_dokumente_public_ids_ergaenzen`) ist auf beiden Backends
+    identische, portable SQL-Syntax.
+    """
+    if db_backend.ist_postgresql():
+        return _SCHEMA_VORLAGE.format(PK="SERIAL PRIMARY KEY", BLOB="BYTEA")
+    return _SCHEMA_VORLAGE.format(PK="INTEGER PRIMARY KEY AUTOINCREMENT", BLOB="BLOB")
+
+
+_SCHEMA_VORLAGE = """
+    CREATE TABLE IF NOT EXISTS benutzer (
+        id {PK},
+        benutzername TEXT NOT NULL UNIQUE,
+        email TEXT NOT NULL UNIQUE,
+        passwort_hash TEXT NOT NULL,
+        erstellt_am TEXT NOT NULL,
+        aktualisiert_am TEXT NOT NULL,
+        aktiv INTEGER NOT NULL DEFAULT 1,
+        email_verified INTEGER NOT NULL DEFAULT 1,
+        last_login_at TEXT,
+        last_activity_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS dokumente (
+        id {PK},
+        user_id INTEGER NOT NULL REFERENCES benutzer(id) ON DELETE CASCADE,
+        dateiname TEXT NOT NULL,
+        hash TEXT NOT NULL,
+        seitenzahl INTEGER NOT NULL,
+        hochgeladen_am TEXT NOT NULL,
+        dateityp TEXT NOT NULL DEFAULT 'pdf',
+        einheit_typ TEXT NOT NULL DEFAULT 'seite',
+        groesse_bytes INTEGER,
+        storage_key TEXT,
+        UNIQUE(hash, user_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS chunks (
+        id {PK},
+        dokument_id INTEGER NOT NULL REFERENCES dokumente(id) ON DELETE CASCADE,
+        seitennummer INTEGER NOT NULL,
+        text TEXT NOT NULL,
+        embedding {BLOB} NOT NULL,
+        einheit_typ TEXT NOT NULL DEFAULT 'seite',
+        einheit_anzeige TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS chats (
+        id {PK},
+        user_id INTEGER NOT NULL REFERENCES benutzer(id) ON DELETE CASCADE,
+        titel TEXT NOT NULL,
+        erstellt_am TEXT NOT NULL,
+        aktualisiert_am TEXT NOT NULL,
+        dokument_ids TEXT NOT NULL DEFAULT '[]'
+    );
+
+    CREATE TABLE IF NOT EXISTS nachrichten (
+        id {PK},
+        chat_id INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+        frage TEXT NOT NULL,
+        antwort TEXT NOT NULL,
+        quellen TEXT NOT NULL DEFAULT '[]',
+        erstellt_am TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS email_verifications (
+        id {PK},
+        user_id INTEGER NOT NULL REFERENCES benutzer(id) ON DELETE CASCADE,
+        email TEXT NOT NULL,
+        token_hash TEXT NOT NULL UNIQUE,
+        erstellt_am TEXT NOT NULL,
+        laeuft_ab_am TEXT NOT NULL,
+        verwendet_am TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS password_resets (
+        id {PK},
+        user_id INTEGER NOT NULL REFERENCES benutzer(id) ON DELETE CASCADE,
+        token_hash TEXT NOT NULL UNIQUE,
+        erstellt_am TEXT NOT NULL,
+        laeuft_ab_am TEXT NOT NULL,
+        verwendet_am TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS sessions (
+        id {PK},
+        user_id INTEGER NOT NULL REFERENCES benutzer(id) ON DELETE CASCADE,
+        token_hash TEXT NOT NULL UNIQUE,
+        erstellt_am TEXT NOT NULL,
+        last_activity_at TEXT NOT NULL,
+        laeuft_ab_am TEXT NOT NULL,
+        revoked_am TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS security_events (
+        id {PK},
+        ts TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        user_id INTEGER REFERENCES benutzer(id) ON DELETE SET NULL,
+        identitaet TEXT,
+        ip TEXT,
+        erfolgreich INTEGER NOT NULL DEFAULT 1,
+        detail TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token_hash);
+    CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+    CREATE INDEX IF NOT EXISTS idx_security_events_lookup
+        ON security_events(event_type, identitaet, ts);
+
+    CREATE TABLE IF NOT EXISTS zwei_faktor (
+        user_id INTEGER PRIMARY KEY REFERENCES benutzer(id) ON DELETE CASCADE,
+        aktiv INTEGER NOT NULL DEFAULT 0,
+        secret_verschluesselt TEXT,
+        secret_key_version INTEGER,
+        pending_secret_verschluesselt TEXT,
+        pending_key_version INTEGER,
+        pending_erstellt_am TEXT,
+        letzter_zeitschritt INTEGER,
+        aktiviert_am TEXT,
+        aktualisiert_am TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS backup_codes (
+        id {PK},
+        user_id INTEGER NOT NULL REFERENCES benutzer(id) ON DELETE CASCADE,
+        code_hash TEXT NOT NULL,
+        erstellt_am TEXT NOT NULL,
+        verwendet_am TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS zwei_faktor_challenges (
+        id {PK},
+        user_id INTEGER NOT NULL REFERENCES benutzer(id) ON DELETE CASCADE,
+        challenge_token_hash TEXT NOT NULL UNIQUE,
+        erstellt_am TEXT NOT NULL,
+        laeuft_ab_am TEXT NOT NULL,
+        fehlversuche INTEGER NOT NULL DEFAULT 0,
+        verwendet_am TEXT,
+        abgebrochen_am TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_backup_codes_user ON backup_codes(user_id);
+    CREATE INDEX IF NOT EXISTS idx_2fa_challenges_token
+        ON zwei_faktor_challenges(challenge_token_hash);
+    CREATE INDEX IF NOT EXISTS idx_2fa_challenges_user ON zwei_faktor_challenges(user_id);
+
+    CREATE TABLE IF NOT EXISTS produkt_zugriffe (
+        id {PK},
+        user_id INTEGER NOT NULL REFERENCES benutzer(id) ON DELETE CASCADE,
+        product_key TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'aktiv',
+        plan TEXT NOT NULL DEFAULT 'standard',
+        aktiviert_am TEXT NOT NULL,
+        laeuft_ab_am TEXT,
+        UNIQUE(user_id, product_key)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_produkt_zugriffe_user ON produkt_zugriffe(user_id);
+
+    CREATE TABLE IF NOT EXISTS storage_cleanup_auftraege (
+        id {PK},
+        storage_key TEXT NOT NULL,
+        art TEXT NOT NULL DEFAULT 'objekt',
+        grund TEXT NOT NULL,
+        erstellt_am TEXT NOT NULL,
+        versuche INTEGER NOT NULL DEFAULT 0,
+        letzter_versuch_am TEXT,
+        naechster_versuch_am TEXT,
+        status TEXT NOT NULL DEFAULT 'offen',
+        letzter_fehler TEXT,
+        erledigt_am TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_storage_cleanup_status
+        ON storage_cleanup_auftraege(status, naechster_versuch_am);
+"""
+
+
 def datenbank_initialisieren():
     """Legt benötigte Tabellen an, ergänzt fehlende Spalten und migriert Altdaten.
 
     Reihenfolge ist bewusst: (1) Tabellen inkl. `benutzer` frisch anlegen
-    (wirkt nur bei einer brandneuen Datenbank), (2) fehlende Spalten
-    additiv ergänzen (wirkt nur bei einer bestehenden Alt-Datenbank vor
-    der Mehrbenutzer- bzw. Konto-/Sicherheits-Umstellung), (3)
-    eigentümerlose Alt-Zeilen einem Bootstrap-Konto zuweisen, (4)
-    `dokumente` bei Bedarf mit zusammengesetzter Eindeutigkeit neu
-    aufbauen, (5) eine dadurch (bei vor diesem Fix migrierten
-    Datenbanken) defekt gewordene `chunks`-Fremdschlüssel-Referenz
-    reparieren, (6) `chats.user_id` bei Bedarf mit echter
-    `ON DELETE CASCADE`-Kaskade neu aufbauen (Voraussetzung für
-    `konto_endgueltig_loeschen`, siehe `_chats_tabelle_neu_aufbauen`),
-    (7) Originaldateien in die Pro-Benutzer-Ordnerstruktur verschieben.
-    Jeder Schritt ist für sich idempotent - beliebig oft ausführbar,
-    ohne bestehende Daten zu verlieren oder zu duplizieren.
-
-    Unterstützt aktuell AUSSCHLIESSLICH das Backend `sqlite` - alle
-    Schema-/Migrationsschritte hier (`PRAGMA`, `ALTER TABLE ... RENAME
-    TO`, `INSERT OR IGNORE`, ...) sind SQLite-spezifisch (siehe
-    `db_backend.py`s Moduldocstring für den genauen Umfang der
-    DB-Abstraktion in diesem Block). `CLEVORIQ_DATABASE_BACKEND=postgresql`
-    scheitert deshalb hier bewusst früh und klar, statt mit einer
-    SQL-Syntaxfehlermeldung mitten in der Migration.
+    (wirkt nur bei einer brandneuen Datenbank; Schema-Text dialektabhängig,
+    siehe `_schema_sql`), (2) fehlende Spalten additiv ergänzen (wirkt nur
+    bei einer bestehenden Alt-Datenbank vor der Mehrbenutzer- bzw.
+    Konto-/Sicherheits-Umstellung), (3) eigentümerlose Alt-Zeilen einem
+    Bootstrap-Konto zuweisen, (4)-(6) SQLITE-spezifische Reparatur
+    historischer Altbestände (siehe unten - unter PostgreSQL komplett
+    übersprungen, da eine frische PostgreSQL-Datenbank diesen Schaden nie
+    hatte), (7) Originaldateien in die Pro-Benutzer-Ordnerstruktur
+    verschieben (ebenfalls rein lokal-dateisystembasiert, backend-unabhängig).
+    Jeder Schritt ist für sich idempotent - beliebig oft ausführbar, ohne
+    bestehende Daten zu verlieren oder zu duplizieren, unter SQLite UND
+    PostgreSQL gleichermaßen (siehe CLAUDE.md "Dual-Backend-Architektur").
     """
-    if db_backend.aktuelles_backend() != db_backend.BACKEND_SQLITE:
-        raise NotImplementedError(
-            "PostgreSQL wird als Datenbank-Backend vorbereitet (Verbindungsaufbau, "
-            "Konfiguration über CLEVORIQ_DATABASE_URL - siehe db_backend.py), aber "
-            "das SQL-Schema und alle Abfragen in speicher.py sind aktuell noch "
-            "SQLite-spezifisch. Die vollständige Portierung ist für den nächsten "
-            "Architekturblock vorgesehen. Setze CLEVORIQ_DATABASE_BACKEND=sqlite "
-            "(Standard), um Clevoriq weiter zu betreiben."
-        )
-
     with _verbindung() as conn:
-        conn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS benutzer (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                benutzername TEXT NOT NULL UNIQUE,
-                email TEXT NOT NULL UNIQUE,
-                passwort_hash TEXT NOT NULL,
-                erstellt_am TEXT NOT NULL,
-                aktualisiert_am TEXT NOT NULL,
-                aktiv INTEGER NOT NULL DEFAULT 1,
-                email_verified INTEGER NOT NULL DEFAULT 1,
-                last_login_at TEXT,
-                last_activity_at TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS dokumente (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL REFERENCES benutzer(id) ON DELETE CASCADE,
-                dateiname TEXT NOT NULL,
-                hash TEXT NOT NULL,
-                seitenzahl INTEGER NOT NULL,
-                hochgeladen_am TEXT NOT NULL,
-                dateityp TEXT NOT NULL DEFAULT 'pdf',
-                einheit_typ TEXT NOT NULL DEFAULT 'seite',
-                groesse_bytes INTEGER,
-                storage_key TEXT,
-                UNIQUE(hash, user_id)
-            );
-
-            CREATE TABLE IF NOT EXISTS chunks (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                dokument_id INTEGER NOT NULL REFERENCES dokumente(id) ON DELETE CASCADE,
-                seitennummer INTEGER NOT NULL,
-                text TEXT NOT NULL,
-                embedding BLOB NOT NULL,
-                einheit_typ TEXT NOT NULL DEFAULT 'seite',
-                einheit_anzeige TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS chats (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL REFERENCES benutzer(id) ON DELETE CASCADE,
-                titel TEXT NOT NULL,
-                erstellt_am TEXT NOT NULL,
-                aktualisiert_am TEXT NOT NULL,
-                dokument_ids TEXT NOT NULL DEFAULT '[]'
-            );
-
-            CREATE TABLE IF NOT EXISTS nachrichten (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                chat_id INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
-                frage TEXT NOT NULL,
-                antwort TEXT NOT NULL,
-                quellen TEXT NOT NULL DEFAULT '[]',
-                erstellt_am TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS email_verifications (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL REFERENCES benutzer(id) ON DELETE CASCADE,
-                email TEXT NOT NULL,
-                token_hash TEXT NOT NULL UNIQUE,
-                erstellt_am TEXT NOT NULL,
-                laeuft_ab_am TEXT NOT NULL,
-                verwendet_am TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS password_resets (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL REFERENCES benutzer(id) ON DELETE CASCADE,
-                token_hash TEXT NOT NULL UNIQUE,
-                erstellt_am TEXT NOT NULL,
-                laeuft_ab_am TEXT NOT NULL,
-                verwendet_am TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS sessions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL REFERENCES benutzer(id) ON DELETE CASCADE,
-                token_hash TEXT NOT NULL UNIQUE,
-                erstellt_am TEXT NOT NULL,
-                last_activity_at TEXT NOT NULL,
-                laeuft_ab_am TEXT NOT NULL,
-                revoked_am TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS security_events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                ts TEXT NOT NULL,
-                event_type TEXT NOT NULL,
-                user_id INTEGER REFERENCES benutzer(id) ON DELETE SET NULL,
-                identitaet TEXT,
-                ip TEXT,
-                erfolgreich INTEGER NOT NULL DEFAULT 1,
-                detail TEXT
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token_hash);
-            CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
-            CREATE INDEX IF NOT EXISTS idx_security_events_lookup
-                ON security_events(event_type, identitaet, ts);
-
-            CREATE TABLE IF NOT EXISTS zwei_faktor (
-                user_id INTEGER PRIMARY KEY REFERENCES benutzer(id) ON DELETE CASCADE,
-                aktiv INTEGER NOT NULL DEFAULT 0,
-                secret_verschluesselt TEXT,
-                secret_key_version INTEGER,
-                pending_secret_verschluesselt TEXT,
-                pending_key_version INTEGER,
-                pending_erstellt_am TEXT,
-                letzter_zeitschritt INTEGER,
-                aktiviert_am TEXT,
-                aktualisiert_am TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS backup_codes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL REFERENCES benutzer(id) ON DELETE CASCADE,
-                code_hash TEXT NOT NULL,
-                erstellt_am TEXT NOT NULL,
-                verwendet_am TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS zwei_faktor_challenges (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL REFERENCES benutzer(id) ON DELETE CASCADE,
-                challenge_token_hash TEXT NOT NULL UNIQUE,
-                erstellt_am TEXT NOT NULL,
-                laeuft_ab_am TEXT NOT NULL,
-                fehlversuche INTEGER NOT NULL DEFAULT 0,
-                verwendet_am TEXT,
-                abgebrochen_am TEXT
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_backup_codes_user ON backup_codes(user_id);
-            CREATE INDEX IF NOT EXISTS idx_2fa_challenges_token
-                ON zwei_faktor_challenges(challenge_token_hash);
-            CREATE INDEX IF NOT EXISTS idx_2fa_challenges_user ON zwei_faktor_challenges(user_id);
-
-            CREATE TABLE IF NOT EXISTS produkt_zugriffe (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL REFERENCES benutzer(id) ON DELETE CASCADE,
-                product_key TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'aktiv',
-                plan TEXT NOT NULL DEFAULT 'standard',
-                aktiviert_am TEXT NOT NULL,
-                laeuft_ab_am TEXT,
-                UNIQUE(user_id, product_key)
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_produkt_zugriffe_user ON produkt_zugriffe(user_id);
-            """
-        )
+        conn.executescript(_schema_sql())
 
         # Additive Migration für Datenbanken, die vor der Mehrformat-,
         # der Mehrbenutzer- bzw. der Konto-/Sicherheits-Umstellung
@@ -798,26 +824,41 @@ def datenbank_initialisieren():
         _dokumente_public_ids_ergaenzen(conn)
         _dokumente_storage_keys_ergaenzen(conn)
         _produktzugriffe_migrieren(conn)
-        muss_dokumente_neu_aufbauen = not _dokumente_tabelle_pro_benutzer_eindeutig(conn)
+
+        # Die folgenden drei "neu_aufbauen"-Reparaturen (siehe deren
+        # jeweilige Docstrings) beheben AUSSCHLIESSLICH Schäden, die nur
+        # unter SQLite überhaupt entstehen konnten (SQLites `ALTER TABLE
+        # ... RENAME TO`-Verhalten bei Fremdschlüsseln vor der
+        # Mehrbenutzer-Umstellung). Eine frische PostgreSQL-Datenbank
+        # durchlief diese Historie nie und braucht die Reparatur folglich
+        # nicht - unter PostgreSQL bewusst komplett übersprungen, statt
+        # SQLite-spezifische PRAGMA-/`sqlite3.connect`-Logik zu portieren.
+        muss_dokumente_neu_aufbauen = (
+            not db_backend.ist_postgresql()
+            and not _dokumente_tabelle_pro_benutzer_eindeutig(conn)
+        )
 
     if muss_dokumente_neu_aufbauen:
         _dokumente_tabelle_neu_aufbauen()
 
-    # Immer (nicht nur wenn der obige Neuaufbau in diesem Lauf
-    # stattfand) - bereits vor diesem Fix migrierte Datenbanken tragen
-    # den Schaden dauerhaft in ihrem gespeicherten Tabellen-DDL und
-    # brauchen die Reparatur bei jedem Start, bis sie einmal gelaufen
-    # ist; die Funktion selbst prüft und ist ein No-Op, wenn nichts
-    # defekt ist.
-    _chunks_tabelle_neu_aufbauen()
+    if not db_backend.ist_postgresql():
+        # Immer (nicht nur wenn der obige Neuaufbau in diesem Lauf
+        # stattfand) - bereits vor diesem Fix migrierte Datenbanken tragen
+        # den Schaden dauerhaft in ihrem gespeicherten Tabellen-DDL und
+        # brauchen die Reparatur bei jedem Start, bis sie einmal gelaufen
+        # ist; die Funktion selbst prüft und ist ein No-Op, wenn nichts
+        # defekt ist.
+        _chunks_tabelle_neu_aufbauen()
 
-    # Ebenfalls immer, aus demselben Grund - repariert eine fehlende
-    # `ON DELETE CASCADE`-Kaskade auf `chats.user_id` bei Datenbanken,
-    # die vor der Konto-/Sicherheits-Umstellung angelegt wurden. Muss
-    # VOR jeder Nutzung von `konto_endgueltig_loeschen` gelaufen sein,
-    # sonst schlägt die Kontolöschung an verbliebenen Chats fehl statt
-    # sie korrekt zu kaskadieren.
-    _chats_tabelle_neu_aufbauen()
+        # Ebenfalls immer, aus demselben Grund - repariert eine fehlende
+        # `ON DELETE CASCADE`-Kaskade auf `chats.user_id` bei Datenbanken,
+        # die vor der Konto-/Sicherheits-Umstellung angelegt wurden. Muss
+        # VOR jeder Nutzung von `konto_endgueltig_loeschen` gelaufen sein,
+        # sonst schlägt die Kontolöschung an verbliebenen Chats fehl statt
+        # sie korrekt zu kaskadieren. Eine frisch angelegte PostgreSQL-
+        # Tabelle trägt die `ON DELETE CASCADE`-Klausel von Anfang an
+        # korrekt (siehe `_schema_sql`), braucht diese Reparatur also nie.
+        _chats_tabelle_neu_aufbauen()
 
     _dateien_migrieren()
 
@@ -844,22 +885,25 @@ def benutzer_erstellen(benutzername, email, passwort):
     damit bestehende bzw. Entwicklungs-/Migrationskonten durch die neue
     Verifizierungspflicht nicht nachträglich ausgesperrt werden.
 
-    Wirft `sqlite3.IntegrityError`, wenn Benutzername oder E-Mail schon
-    vergeben sind (`UNIQUE`-Constraints) - `benutzer.py` prüft dies
-    vorab bereits gezielt (für konkrete deutsche Fehlermeldungen), diese
-    Funktion selbst verlässt sich aber nicht allein darauf, sondern auf
-    die Datenbank-Constraints als letzte, verbindliche Schutzschicht.
+    Wirft eine Datenbank-Ausnahme (`sqlite3.IntegrityError` unter
+    SQLite, die entsprechende `psycopg2`-Ausnahme unter PostgreSQL),
+    wenn Benutzername oder E-Mail schon vergeben sind (`UNIQUE`-
+    Constraints) - `benutzer.py` prüft dies vorab bereits gezielt (für
+    konkrete deutsche Fehlermeldungen und dialektunabhängig über
+    `except Exception`), diese Funktion selbst verlässt sich aber nicht
+    allein darauf, sondern auf die Datenbank-Constraints als letzte,
+    verbindliche, backend-übergreifend wirksame Schutzschicht.
     """
     jetzt = _jetzt()
 
     with _verbindung() as conn:
-        cursor = conn.execute(
+        neue_id = db_backend.insert_und_id_zurueckgeben(
+            conn,
             "INSERT INTO benutzer "
             "(benutzername, email, passwort_hash, erstellt_am, aktualisiert_am, aktiv, email_verified) "
             "VALUES (?, ?, ?, ?, ?, 1, 0)",
             (benutzername.strip(), email.strip().lower(), auth.passwort_hash(passwort), jetzt, jetzt),
         )
-        neue_id = cursor.lastrowid
 
         # Jeder neue Benutzer bekommt in dieser Entwicklungsphase
         # automatisch Zugriff auf Clevoriq Documents (siehe CLAUDE.md
@@ -883,14 +927,18 @@ def benutzername_frei(benutzername, ausser_benutzer_id=None):
     der Prüfung aus - nötig, damit ein Benutzer beim Bearbeiten seiner
     Kontodaten (`konto_aktualisieren`) nicht fälschlich gegen seinen
     EIGENEN, unveränderten Benutzernamen als "bereits vergeben"
-    abgewiesen wird. `id IS NOT ?` mit `ausser_benutzer_id=None` wird zu
-    `id IS NOT NULL`, was für jede Zeile wahr ist (IDs sind nie NULL) -
-    ohne Ausschluss-ID verhält sich die Prüfung also unverändert wie
-    zuvor.
+    abgewiesen wird. `id IS DISTINCT FROM ?` mit `ausser_benutzer_id=None`
+    wird zu `id IS DISTINCT FROM NULL`, was für jede Zeile wahr ist (IDs
+    sind nie NULL) - ohne Ausschluss-ID verhält sich die Prüfung also
+    unverändert wie zuvor. `IS DISTINCT FROM` statt SQLites (nicht
+    standardkonformem) `IS NOT` mit einem Nicht-NULL-Wert rechts davon -
+    Letzteres ist unter PostgreSQL ein Syntaxfehler, `IS DISTINCT FROM`
+    ist Standard-SQL und liefert unter SQLite (seit 3.35) exakt dieselbe
+    NULL-sichere Semantik (siehe CLAUDE.md "SQL-Dialektunterschiede").
     """
     with _verbindung() as conn:
         zeile = conn.execute(
-            "SELECT 1 FROM benutzer WHERE benutzername = ? AND id IS NOT ?",
+            "SELECT 1 FROM benutzer WHERE benutzername = ? AND id IS DISTINCT FROM ?",
             (benutzername.strip(), ausser_benutzer_id),
         ).fetchone()
         return zeile is None
@@ -900,7 +948,7 @@ def email_frei(email, ausser_benutzer_id=None):
     """Prüft, ob eine E-Mail-Adresse noch frei ist (siehe `benutzername_frei`)."""
     with _verbindung() as conn:
         zeile = conn.execute(
-            "SELECT 1 FROM benutzer WHERE email = ? AND id IS NOT ?",
+            "SELECT 1 FROM benutzer WHERE email = ? AND id IS DISTINCT FROM ?",
             (email.strip().lower(), ausser_benutzer_id),
         ).fetchone()
         return zeile is None
@@ -985,13 +1033,13 @@ def konto_aktualisieren(benutzer_id, aktuelles_passwort, neuer_benutzername=None
             return False, "Bitte gib eine gültige E-Mail-Adresse ein.", False
 
         if conn.execute(
-            "SELECT 1 FROM benutzer WHERE benutzername = ? AND id IS NOT ?",
+            "SELECT 1 FROM benutzer WHERE benutzername = ? AND id IS DISTINCT FROM ?",
             (neuer_benutzername, benutzer_id),
         ).fetchone():
             return False, "Dieser Benutzername ist bereits vergeben.", False
 
         if conn.execute(
-            "SELECT 1 FROM benutzer WHERE email = ? AND id IS NOT ?",
+            "SELECT 1 FROM benutzer WHERE email = ? AND id IS DISTINCT FROM ?",
             (neue_email, benutzer_id),
         ).fetchone():
             return False, "Diese E-Mail-Adresse wird bereits verwendet.", False
@@ -1121,24 +1169,32 @@ def email_verifizierung_bestaetigen(roher_token):
     Sitzung blind als Ziel angenommen werden müsste (siehe Anforderung
     "bestehende Session darf nicht versehentlich einem anderen Benutzer
     zugeordnet werden").
+
+    Race-sicher (siehe CLAUDE.md "Concurrency"): das "als verwendet
+    markieren" ist EINE atomare `UPDATE ... WHERE verwendet_am IS NULL
+    RETURNING ...`-Anweisung statt eines getrennten SELECT-dann-UPDATE -
+    von zwei zeitgleichen Einlöseversuchen desselben Tokens (z. B. ein
+    Doppelklick oder ein vorab ladender Link-Scanner) kann dadurch
+    bestenfalls GENAU EINER erfolgreich sein, nie beide. `RETURNING`
+    funktioniert identisch unter SQLite (seit 3.35) und PostgreSQL.
     """
     with _verbindung() as conn:
         zeile = conn.execute(
-            "SELECT id, user_id, email, laeuft_ab_am FROM email_verifications "
-            "WHERE token_hash = ? AND verwendet_am IS NULL",
-            (_token_hash(roher_token),),
+            "UPDATE email_verifications SET verwendet_am = ? "
+            "WHERE token_hash = ? AND verwendet_am IS NULL "
+            "RETURNING id, user_id, email, laeuft_ab_am",
+            (_jetzt(), _token_hash(roher_token)),
         ).fetchone()
 
         if not zeile:
             return False, "Dieser Bestätigungslink ist ungültig oder wurde bereits verwendet.", None
 
         if datetime.fromisoformat(zeile["laeuft_ab_am"]) < datetime.now():
+            # Bewusst TROTZDEM verbraucht (siehe oben) statt die
+            # Markierung zurückzurollen - ein abgelaufener Token soll
+            # kein zweites Mal probierbar sein.
             return False, "Dieser Bestätigungslink ist abgelaufen.", None
 
-        conn.execute(
-            "UPDATE email_verifications SET verwendet_am = ? WHERE id = ?",
-            (_jetzt(), zeile["id"]),
-        )
         conn.execute(
             "UPDATE benutzer SET email_verified = 1 WHERE id = ? AND email = ?",
             (zeile["user_id"], zeile["email"]),
@@ -1194,14 +1250,19 @@ def passwort_reset_einloesen(roher_token, neues_passwort):
     """Löst einen Passwort-Reset-Token ein und setzt das neue Passwort.
 
     Gibt `(erfolg: bool, meldung: str, user_id_oder_None)` zurück.
-    Einmalig verwendbar (`verwendet_am` wird sofort gesetzt) und
-    zeitlich begrenzt gültig. Macht bei Erfolg zusätzlich ALLE
+    Einmalig verwendbar (`verwendet_am` wird ATOMAR gesetzt, siehe unten)
+    und zeitlich begrenzt gültig. Macht bei Erfolg zusätzlich ALLE
     Sitzungen dieses Benutzers ungültig (`sitzungen_widerrufen_fuer_benutzer`,
     ohne Ausnahme) - dieser Ablauf ist per Definition nicht an eine
     aktuell angemeldete Sitzung gebunden (das Zurücksetzen erfolgt über
     einen per E-Mail zugestellten Link, nicht im angemeldeten Zustand),
     ein Benutzer muss sich danach überall erneut mit dem neuen Passwort
     anmelden.
+
+    Race-sicher (siehe CLAUDE.md "Concurrency"): das Verbrauchen des
+    Tokens ist eine atomare `UPDATE ... WHERE verwendet_am IS NULL
+    RETURNING ...`-Anweisung (wie `email_verifizierung_bestaetigen`) -
+    von zwei zeitgleichen Einlöseversuchen kann nur einer gewinnen.
     """
     if not auth.passwort_stark_genug(neues_passwort):
         return False, (
@@ -1211,9 +1272,10 @@ def passwort_reset_einloesen(roher_token, neues_passwort):
 
     with _verbindung() as conn:
         zeile = conn.execute(
-            "SELECT id, user_id, laeuft_ab_am FROM password_resets "
-            "WHERE token_hash = ? AND verwendet_am IS NULL",
-            (_token_hash(roher_token),),
+            "UPDATE password_resets SET verwendet_am = ? "
+            "WHERE token_hash = ? AND verwendet_am IS NULL "
+            "RETURNING id, user_id, laeuft_ab_am",
+            (_jetzt(), _token_hash(roher_token)),
         ).fetchone()
 
         if not zeile:
@@ -1225,10 +1287,6 @@ def passwort_reset_einloesen(roher_token, neues_passwort):
         conn.execute(
             "UPDATE benutzer SET passwort_hash = ?, aktualisiert_am = ? WHERE id = ?",
             (auth.passwort_hash(neues_passwort), _jetzt(), zeile["user_id"]),
-        )
-        conn.execute(
-            "UPDATE password_resets SET verwendet_am = ? WHERE id = ?",
-            (_jetzt(), zeile["id"]),
         )
         benutzer_id = zeile["user_id"]
 
@@ -1346,7 +1404,7 @@ def sitzungen_widerrufen_fuer_benutzer(benutzer_id, ausser_roher_token=None):
     with _verbindung() as conn:
         conn.execute(
             "UPDATE sessions SET revoked_am = ? "
-            "WHERE user_id = ? AND revoked_am IS NULL AND token_hash IS NOT ?",
+            "WHERE user_id = ? AND revoked_am IS NULL AND token_hash IS DISTINCT FROM ?",
             (_jetzt(), benutzer_id, ausnahme_hash),
         )
 
@@ -1436,28 +1494,34 @@ def konto_endgueltig_loeschen(benutzer_id):
     Fremdschlüssel-Fehler ab, STATT sie zu kaskadieren, und das Konto
     bliebe (korrekt) erhalten statt inkonsistent halb gelöscht zu werden.
 
-    Die Originaldateien auf der Festplatte liegen außerhalb der
-    Datenbank und werden deshalb bewusst ERST NACH erfolgreichem Commit
-    entfernt: Schlägt der DB-Teil fehl, bleiben die Dateien unangetastet
-    statt verwaist referenziert zu werden.
+    Die Originaldateien liegen außerhalb der Datenbank - ihre Löschung
+    kann daher nie in derselben Transaktion wie die `benutzer`-Zeile
+    committet werden. Statt dessen wird die Löschabsicht für den
+    gesamten Storage-Präfix dieses Benutzers ATOMAR MIT der `benutzer`-
+    Löschung als Cleanup-Auftrag persistiert (Outbox-Muster, siehe
+    CLAUDE.md "Storage-Cleanup/Outbox" und `_storage_cleanup_auftrag_erstellen`),
+    danach wird die tatsächliche Löschung sofort versucht. Ein Storage-
+    Ausfall verzögert dadurch NIE die Kontolöschung selbst (kein Login
+    mehr möglich, keine hängenden Fremdschlüssel, ab dem DB-Commit
+    unwiderruflich) und verhindert nie, dass die Objekte irgendwann
+    zuverlässig bereinigt werden (`cleanup_pending_storage_deletions`)
+    - und (siehe dort) NIE die Objekte eines ANDEREN Benutzers, da der
+    Auftrag exakt auf DIESEN Präfix festgelegt ist.
 
-    Gibt `None` bei vollem Erfolg zurück, sonst eine Fehlermeldung zur
-    (unvollständigen) Objekt-Bereinigung - das Konto selbst ist in
-    jedem Fall bereits gelöscht (kein Login mehr möglich, keine
-    hängenden Fremdschlüssel in der Datenbank).
+    Gibt immer `None` zurück - die Kontolöschung selbst ist ab dem
+    DB-Commit in jedem Fall vollständig und endgültig; eine eventuell
+    noch ausstehende Storage-Bereinigung ist kein Fehler, den der
+    Aufrufer behandeln müsste.
     """
+    praefix = f"users/{int(benutzer_id)}/"
+
     with _verbindung() as conn:
         conn.execute("DELETE FROM benutzer WHERE id = ?", (benutzer_id,))
+        _storage_cleanup_auftrag_erstellen(
+            conn, praefix, grund="konto_geloescht", art=STORAGE_CLEANUP_ART_PRAEFIX
+        )
 
-    try:
-        # Löscht ALLE Storage-Objekte dieses Benutzers über den
-        # Storage-Layer (siehe `storage.py`) statt direkt `shutil.rmtree`
-        # aufzurufen - funktioniert unverändert für `LocalFileStorage`
-        # UND (vorbereitet, noch nicht produktiv genutzt) für ein
-        # künftiges `S3Storage`-Backend.
-        _storage().praefix_loeschen(f"users/{int(benutzer_id)}/")
-    except storage.StorageFehler as fehler:
-        return str(fehler)
+    _storage_sofort_loeschen_oder_vormerken(praefix, art=STORAGE_CLEANUP_ART_PRAEFIX)
 
     return None
 
@@ -1497,6 +1561,208 @@ def _storage():
     Storage-Layer mit umleiten. `APP_DATEN_ORDNER` ist nur für Backend
     `local` relevant (siehe `storage.storage_backend`)."""
     return storage.storage_backend(APP_DATEN_ORDNER)
+
+
+# --- Storage-Cleanup-Outbox ---
+#
+# Löst die in Block 4 dokumentierte bekannte Grenze auf ("Storage-Delete-
+# Konsistenz verbessern", siehe CLAUDE.md): Löschen einer DB-Zeile UND
+# Löschen des zugehörigen Storage-Objekts sind zwei getrennte Systeme,
+# die niemals in EINER Transaktion atomar zusammen committet werden
+# können (die Datenbank kann das Storage-Backend nicht mit einschließen).
+# Statt dem Storage-Löschversuch blind zu vertrauen, wird die LÖSCH-
+# ABSICHT selbst als Zeile in `storage_cleanup_auftraege` PERSISTIERT -
+# und zwar IMMER in derselben Transaktion wie die DB-Änderung, die das
+# Dokument/Konto für den Benutzer bereits unsichtbar macht (klassisches
+# "Transactional Outbox"-Muster). Der eigentliche Storage-Löschversuch
+# passiert danach, außerhalb der Transaktion:
+#
+#   DB-Zeile löschen + Cleanup-Auftrag anlegen  (EINE Transaktion, atomar)
+#                    │
+#                    ▼
+#   Storage-Löschung sofort versuchen (best effort, synchron)
+#         │                              │
+#      Erfolg                        Fehlschlag
+#         │                              │
+#   Auftrag "erledigt"          Auftrag bleibt "offen" -
+#                                später erneut versuchbar über
+#                                `cleanup_pending_storage_deletions`
+#
+# Ein Storage-Ausfall verzögert dadurch NIE das für den Benutzer sofort
+# wirksame Löschen (das ist bereits mit dem DB-Commit erledigt) und
+# lässt trotzdem nie ein Objekt dauerhaft vergessen zurück. Es gibt noch
+# keinen Scheduler/Worker, der `cleanup_pending_storage_deletions`
+# automatisch aufruft (siehe CLAUDE.md) - nur die Funktion selbst, testbar
+# und bereit für einen künftigen Cronjob/Worker/Maintenance-Task.
+
+STORAGE_CLEANUP_ART_OBJEKT = "objekt"
+STORAGE_CLEANUP_ART_PRAEFIX = "praefix"
+
+STORAGE_CLEANUP_STATUS_OFFEN = "offen"
+STORAGE_CLEANUP_STATUS_ERLEDIGT = "erledigt"
+STORAGE_CLEANUP_STATUS_FEHLGESCHLAGEN = "fehlgeschlagen_final"
+
+# Nach so vielen erfolglosen Versuchen wird ein Auftrag als endgültig
+# fehlgeschlagen markiert, statt unbegrenzt weiter automatisch erneut
+# versucht zu werden - er bleibt in der Tabelle sichtbar (für eine
+# künftige manuelle/administrative Aufmerksamkeit), zählt aber nicht
+# mehr als "offen".
+STORAGE_CLEANUP_MAX_VERSUCHE = 10
+_STORAGE_CLEANUP_BACKOFF_BASIS_MINUTEN = 5
+_STORAGE_CLEANUP_BACKOFF_OBERGRENZE_MINUTEN = 24 * 60
+
+
+def _storage_cleanup_auftrag_erstellen(conn, storage_key, grund, art=STORAGE_CLEANUP_ART_OBJEKT):
+    """Persistiert eine Storage-Löschabsicht - MUSS innerhalb derselben
+    `with _verbindung() as conn:`-Transaktion aufgerufen werden wie die
+    zugehörige DB-Löschung (siehe Abschnitts-Docstring oben), niemals
+    isoliert danach."""
+    if not storage_key:
+        return
+
+    conn.execute(
+        "INSERT INTO storage_cleanup_auftraege "
+        "(storage_key, art, grund, erstellt_am, status) VALUES (?, ?, ?, ?, ?)",
+        (storage_key, art, grund, _jetzt(), STORAGE_CLEANUP_STATUS_OFFEN),
+    )
+
+
+def _storage_cleanup_auftrag_erledigt_markieren(storage_key, art):
+    """Markiert JEDEN noch offenen Cleanup-Auftrag für exakt diesen
+    Storage-Key/diese Art als erledigt - genutzt unmittelbar nach einem
+    erfolgreichen Sofort-Löschversuch (siehe
+    `_storage_sofort_loeschen_oder_vormerken`), damit ein Auftrag nicht
+    unnötig offen bleibt, obwohl das Objekt bereits weg ist."""
+    with _verbindung() as conn:
+        conn.execute(
+            "UPDATE storage_cleanup_auftraege SET status = ?, erledigt_am = ? "
+            "WHERE storage_key = ? AND art = ? AND status = ?",
+            (
+                STORAGE_CLEANUP_STATUS_ERLEDIGT,
+                _jetzt(),
+                storage_key,
+                art,
+                STORAGE_CLEANUP_STATUS_OFFEN,
+            ),
+        )
+
+
+def _storage_sofort_loeschen_oder_vormerken(storage_key, art=STORAGE_CLEANUP_ART_OBJEKT):
+    """Versucht eine Storage-Löschung SOFORT (guter Regelfall, sofort
+    aufgeräumt) - der zugehörige, bereits transaktional persistierte
+    Cleanup-Auftrag (siehe `_storage_cleanup_auftrag_erstellen`) bleibt
+    bei einem Fehlschlag einfach offen stehen und wird NICHT hier selbst
+    behandelt (kein Retry in der Streamlit-UI, siehe CLAUDE.md) - ein
+    späterer Aufruf von `cleanup_pending_storage_deletions` übernimmt
+    das. Wirft NIE eine Ausnahme."""
+    versuch = _storage()
+
+    try:
+        if art == STORAGE_CLEANUP_ART_PRAEFIX:
+            versuch.praefix_loeschen(storage_key)
+        else:
+            versuch.loeschen(storage_key)
+    except storage.StorageFehler:
+        return
+
+    _storage_cleanup_auftrag_erledigt_markieren(storage_key, art)
+
+
+def _naechster_cleanup_versuch(versuche):
+    """Exponentielles Backoff (Basis 5 Minuten, verdoppelt je Fehlversuch,
+    gedeckelt auf 24 Stunden) - vermeidet, dass ein dauerhaft nicht
+    erreichbares Storage-Backend sofort erneut (und erneut, und erneut)
+    angefragt wird."""
+    minuten = min(
+        _STORAGE_CLEANUP_BACKOFF_BASIS_MINUTEN * (2**versuche),
+        _STORAGE_CLEANUP_BACKOFF_OBERGRENZE_MINUTEN,
+    )
+    return (datetime.now() + timedelta(minutes=minuten)).isoformat(timespec="seconds")
+
+
+def cleanup_pending_storage_deletions(limit=50):
+    """Verarbeitet bis zu `limit` offene, fällige Storage-Cleanup-Aufträge -
+    die "Cleanup-Service"-Funktion aus CLAUDE.md "Storage-Cleanup/Outbox".
+    Noch OHNE eigenen Scheduler (siehe dort) - gedacht, künftig über
+    einen Worker/Cronjob/Maintenance-Task periodisch aufgerufen zu werden;
+    aktuell nur direkt (z. B. manuell oder aus einem Test) aufrufbar.
+
+    Für jeden fälligen Auftrag: Storage-Löschung versuchen; bei Erfolg
+    `status = 'erledigt'`; bei Fehlschlag `versuche` erhöhen, `next`-
+    Backoff setzen, den (bereits secret-freien, siehe `storage.StorageFehler`)
+    Fehlertext speichern, und nach `STORAGE_CLEANUP_MAX_VERSUCHE`
+    endgültig auf `fehlgeschlagen_final` setzen statt endlos weiter zu
+    versuchen.
+
+    Jeder Auftrag trägt seinen EIGENEN, bereits beim Anlegen fest
+    zugeordneten `storage_key`/`art` (nie einen Platzhalter/eine
+    Wildcard) - ein Cleanup-Lauf kann daher strukturell nie das Objekt
+    eines ANDEREN Benutzers berühren, selbst wenn in derselben Charge
+    Aufträge mehrerer Benutzer verarbeitet werden.
+
+    Gibt `{"erledigt": int, "fehlgeschlagen": int, "verbleibend_offen": int}`
+    zurück.
+    """
+    jetzt = _jetzt()
+
+    with _verbindung() as conn:
+        auftraege = conn.execute(
+            "SELECT id, storage_key, art, versuche FROM storage_cleanup_auftraege "
+            "WHERE status = ? AND (naechster_versuch_am IS NULL OR naechster_versuch_am <= ?) "
+            "ORDER BY erstellt_am LIMIT ?",
+            (STORAGE_CLEANUP_STATUS_OFFEN, jetzt, limit),
+        ).fetchall()
+
+    erledigt = 0
+    fehlgeschlagen = 0
+    versuch_backend = _storage()
+
+    for auftrag in auftraege:
+        try:
+            if auftrag["art"] == STORAGE_CLEANUP_ART_PRAEFIX:
+                versuch_backend.praefix_loeschen(auftrag["storage_key"])
+            else:
+                versuch_backend.loeschen(auftrag["storage_key"])
+        except storage.StorageFehler as fehler:
+            neue_versuche = auftrag["versuche"] + 1
+            endgueltig_gescheitert = neue_versuche >= STORAGE_CLEANUP_MAX_VERSUCHE
+
+            with _verbindung() as conn:
+                conn.execute(
+                    "UPDATE storage_cleanup_auftraege SET versuche = ?, letzter_versuch_am = ?, "
+                    "naechster_versuch_am = ?, letzter_fehler = ?, status = ? WHERE id = ?",
+                    (
+                        neue_versuche,
+                        _jetzt(),
+                        None if endgueltig_gescheitert else _naechster_cleanup_versuch(neue_versuche),
+                        str(fehler),
+                        STORAGE_CLEANUP_STATUS_FEHLGESCHLAGEN
+                        if endgueltig_gescheitert
+                        else STORAGE_CLEANUP_STATUS_OFFEN,
+                        auftrag["id"],
+                    ),
+                )
+
+            if endgueltig_gescheitert:
+                fehlgeschlagen += 1
+
+            continue
+
+        with _verbindung() as conn:
+            conn.execute(
+                "UPDATE storage_cleanup_auftraege SET status = ?, erledigt_am = ? WHERE id = ?",
+                (STORAGE_CLEANUP_STATUS_ERLEDIGT, _jetzt(), auftrag["id"]),
+            )
+
+        erledigt += 1
+
+    with _verbindung() as conn:
+        verbleibend = conn.execute(
+            "SELECT COUNT(*) AS anzahl FROM storage_cleanup_auftraege WHERE status = ?",
+            (STORAGE_CLEANUP_STATUS_OFFEN,),
+        ).fetchone()["anzahl"]
+
+    return {"erledigt": erledigt, "fehlgeschlagen": fehlgeschlagen, "verbleibend_offen": verbleibend}
 
 
 def _benutzer_dokumente_ordner(benutzer_id):
@@ -1553,9 +1819,15 @@ def dokument_speichern(dateiname, hash_wert, datei_bytes, einheiten_anzahl, date
     Storage-Datei wird ZUERST geschrieben, danach erst die DB-Zeile
     angelegt. Schlägt der Storage-Schreibvorgang fehl, existiert gar
     keine DB-Zeile (keine "Zeile ohne Datei"). Schlägt umgekehrt der
-    DB-Insert fehl (z. B. eine unerwartete Ausnahme), wird das bereits
+    DB-Insert fehl (z. B. eine unerwartete Ausnahme, ein Constraint-
+    Verstoß bei einem gleichzeitigen Duplikat-Upload), wird das bereits
     geschriebene Storage-Objekt wieder gelöscht (Kompensation), bevor
-    die Ausnahme weitergereicht wird - keine dauerhaft verwaiste Datei.
+    die Ausnahme weitergereicht wird. Schlägt SOGAR diese Kompensation
+    fehl (Doppelfehler: DB-Insert UND Storage-Löschung schlagen fehl),
+    wird stattdessen ein persistenter Cleanup-Auftrag angelegt (siehe
+    `_storage_cleanup_auftrag_erstellen`/CLAUDE.md "Storage-Cleanup/
+    Outbox") - selbst ein Doppelfehler darf ein Objekt nie dauerhaft
+    vergessen zurücklassen.
     """
     dokument_public_id = str(uuid.uuid4())
     storage_key = f"users/{benutzer_id}/documents/{dokument_public_id}/original.{dateityp}"
@@ -1565,7 +1837,8 @@ def dokument_speichern(dateiname, hash_wert, datei_bytes, einheiten_anzahl, date
 
     try:
         with _verbindung() as conn:
-            cursor = conn.execute(
+            dokument_id = db_backend.insert_und_id_zurueckgeben(
+                conn,
                 "INSERT INTO dokumente "
                 "(user_id, dateiname, hash, seitenzahl, hochgeladen_am, dateityp, einheit_typ, "
                 "groesse_bytes, public_id, storage_key) "
@@ -1583,15 +1856,17 @@ def dokument_speichern(dateiname, hash_wert, datei_bytes, einheiten_anzahl, date
                     storage_key,
                 ),
             )
-            dokument_id = cursor.lastrowid
     except Exception:
         try:
             storage_backend.loeschen(storage_key)
         except storage.StorageFehler:
-            # Bestmögliche Kompensation - ein sekundärer Storage-Fehler
-            # beim Aufräumen darf die eigentliche (aussagekräftigere)
-            # DB-Ausnahme nicht verdecken.
-            pass
+            # Doppelfehler (DB-Insert UND Kompensations-Löschung
+            # gescheitert) - der Auftrag hier läuft bewusst über eine
+            # EIGENE, frische Transaktion (die des fehlgeschlagenen
+            # Uploads wurde bereits zurückgerollt), damit die
+            # Cleanup-Absicht trotzdem sicher persistiert wird.
+            with _verbindung() as conn:
+                _storage_cleanup_auftrag_erstellen(conn, storage_key, grund="upload_kompensation")
         raise
 
     return dokument_id
@@ -1645,6 +1920,15 @@ def dokument_loeschen(dokument_id, benutzer_id):
     desselben Benutzers (fremde Chats können diese ID ohnehin nie
     enthalten haben, da die Auswahl in der UI stets auf eigene Dokumente
     begrenzt ist - die Einschränkung hier ist zusätzliche Absicherung).
+
+    Storage-Konsistenz (siehe CLAUDE.md "Storage-Cleanup/Outbox"): der
+    Cleanup-Auftrag für das Storage-Objekt wird IN DERSELBEN Transaktion
+    wie die DB-Löschung angelegt, danach wird die tatsächliche Löschung
+    sofort versucht. Das Dokument ist für den Benutzer damit IMMER schon
+    sofort weg (DB-Commit), unabhängig davon, ob der Storage-Löschversuch
+    direkt klappt oder erst später (`cleanup_pending_storage_deletions`)
+    - ein Storage-Ausfall lässt ein gelöschtes Dokument nie wieder
+    auftauchen und ein Objekt nie dauerhaft vergessen zurück.
     """
     with _verbindung() as conn:
         zeile = conn.execute(
@@ -1669,16 +1953,11 @@ def dokument_loeschen(dokument_id, benutzer_id):
                     (json.dumps(bereinigte_ids), chat_zeile["id"]),
                 )
 
+        if zeile["storage_key"]:
+            _storage_cleanup_auftrag_erstellen(conn, zeile["storage_key"], grund="dokument_geloescht")
+
     if zeile["storage_key"]:
-        try:
-            _storage().loeschen(zeile["storage_key"])
-        except storage.StorageFehler:
-            # Die DB-Zeile (die Quelle der Wahrheit für den Benutzer) ist
-            # bereits weg - ein Storage-Fehler hier darf das Löschen aus
-            # der Bibliothek nicht rückgängig machen. Im schlimmsten Fall
-            # bleibt ein für den Benutzer nicht mehr sichtbares, verwaistes
-            # Objekt zurück (siehe CLAUDE.md "bekannte Einschränkungen").
-            pass
+        _storage_sofort_loeschen_oder_vormerken(zeile["storage_key"])
 
 
 def dokument_nach_public_id(public_id, benutzer_id):
@@ -1778,16 +2057,21 @@ def produkt_zugriff_gewaehren(benutzer_id, product_key, plan=None):
     Legt NUR an, wenn noch KEINE Zeile für dieses (Benutzer, Produkt)-Paar
     existiert (`UNIQUE(user_id, product_key)`) - ein bereits bestehender
     Eintrag (egal welchen Status er trägt, z. B. eine künftige manuelle
-    Sperre) wird NIE stillschweigend überschrieben. Wird sowohl von
+    Sperre) wird NIE stillschweigend überschrieben, AUCH NICHT bei zwei
+    gleichzeitigen Aufrufen (siehe `db_backend.upsert_ignore` - unter
+    SQLite `INSERT OR IGNORE`, unter PostgreSQL `ON CONFLICT (...) DO
+    NOTHING`, beides durch den eindeutigen Constraint selbst atomar, kein
+    Python-seitiges "erst prüfen, dann schreiben"). Wird sowohl von
     `benutzer_erstellen` (neue Konten) als auch von der additiven
     Migration `_produktzugriffe_migrieren` (Alt-Konten) genutzt.
     """
     with _verbindung() as conn:
-        conn.execute(
-            "INSERT OR IGNORE INTO produkt_zugriffe "
-            "(user_id, product_key, status, plan, aktiviert_am) "
-            "VALUES (?, ?, ?, ?, ?)",
+        db_backend.upsert_ignore(
+            conn,
+            "produkt_zugriffe",
+            ["user_id", "product_key", "status", "plan", "aktiviert_am"],
             (benutzer_id, product_key, PRODUKT_STATUS_AKTIV, plan or produkte.STANDARD_PLAN, _jetzt()),
+            konflikt_spalten=["user_id", "product_key"],
         )
 
 
@@ -1838,12 +2122,12 @@ def produkte_des_benutzers(benutzer_id):
 def chat_erstellen(benutzer_id, titel=STANDARD_CHAT_TITEL):
     with _verbindung() as conn:
         jetzt = _jetzt()
-        cursor = conn.execute(
+        return db_backend.insert_und_id_zurueckgeben(
+            conn,
             "INSERT INTO chats (user_id, titel, erstellt_am, aktualisiert_am, dokument_ids) "
             "VALUES (?, ?, ?, ?, '[]')",
             (benutzer_id, titel, jetzt, jetzt),
         )
-        return cursor.lastrowid
 
 
 def chat_liste(benutzer_id):
@@ -2076,6 +2360,14 @@ def zwei_faktor_setup_starten(benutzer_id):
     eine spätere Neu-Einrichtung/Rotation (siehe `konto.py`) ersetzen das
     aktive Secret erst bei erfolgreicher Bestätigung des neuen Codes
     (`zwei_faktor_setup_bestaetigen`), nie vorher.
+
+    Race-sicher (siehe CLAUDE.md "Concurrency"): EINE atomare Upsert-
+    Anweisung (`db_backend.upsert_ersetzen`) statt eines getrennten
+    "erst SELECT, dann INSERT-oder-UPDATE" - zwei zeitgleiche Setup-
+    Starts desselben Benutzers können sich dadurch nie gegenseitig in
+    einen inkonsistenten Zwischenzustand bringen. Nur die `pending_*`-
+    Spalten werden je aktualisiert - `aktiv`/`secret_*` eines bereits
+    bestehenden, AKTIVEN Secrets bleiben in JEDEM Fall unangetastet.
     """
     email = benutzer_konto_daten(benutzer_id)["email"]
     klartext_secret = zwei_faktor_krypto.neues_totp_secret()
@@ -2083,24 +2375,18 @@ def zwei_faktor_setup_starten(benutzer_id):
     jetzt = _jetzt()
 
     with _verbindung() as conn:
-        vorhanden = conn.execute(
-            "SELECT 1 FROM zwei_faktor WHERE user_id = ?", (benutzer_id,)
-        ).fetchone()
-
-        if vorhanden:
-            conn.execute(
-                "UPDATE zwei_faktor SET pending_secret_verschluesselt = ?, "
-                "pending_key_version = ?, pending_erstellt_am = ?, aktualisiert_am = ? "
-                "WHERE user_id = ?",
-                (chiffrat, key_version, jetzt, jetzt, benutzer_id),
-            )
-        else:
-            conn.execute(
-                "INSERT INTO zwei_faktor "
-                "(user_id, aktiv, pending_secret_verschluesselt, pending_key_version, "
-                "pending_erstellt_am, aktualisiert_am) VALUES (?, 0, ?, ?, ?, ?)",
-                (benutzer_id, chiffrat, key_version, jetzt, jetzt),
-            )
+        db_backend.upsert_ersetzen(
+            conn,
+            "zwei_faktor",
+            konflikt_spalten=["user_id"],
+            spalten_werte={
+                "user_id": benutzer_id,
+                "pending_secret_verschluesselt": chiffrat,
+                "pending_key_version": key_version,
+                "pending_erstellt_am": jetzt,
+                "aktualisiert_am": jetzt,
+            },
+        )
 
     return klartext_secret, zwei_faktor_krypto.otpauth_uri(klartext_secret, email)
 
@@ -2225,7 +2511,19 @@ def zwei_faktor_backup_code_pruefen_und_verbrauchen(benutzer_id, code):
     Abgleich mehr möglich - stattdessen werden alle noch unverbrauchten
     Codes dieses Benutzers geladen und `code` wird gegen jeden einzeln
     mit `auth.backup_code_pruefen` verifiziert. Das ist bei maximal
-    `BACKUP_CODES_ANZAHL` (10) Zeilen unproblematisch."""
+    `BACKUP_CODES_ANZAHL` (10) Zeilen unproblematisch.
+
+    Race-sicher (siehe CLAUDE.md "Concurrency"): das Kandidaten-Suchen
+    (Argon2-Vergleich) selbst kann nicht atomar sein (er läuft in
+    Python, nicht in SQL), aber das eigentliche VERBRAUCHEN ist eine
+    atomare `UPDATE ... WHERE id = ? AND verwendet_am IS NULL`-Anweisung
+    mit anschließender `rowcount`-Prüfung - haben zwei zeitgleiche
+    Anfragen denselben Code gegen dieselbe Zeile erfolgreich geprüft
+    (z. B. derselbe Backup-Code zweimal knapp gleichzeitig eingereicht),
+    kann nur EINE davon die Zeile tatsächlich als verbraucht markieren;
+    die andere erkennt über `rowcount == 0`, dass sie das Rennen verloren
+    hat, und liefert `False` statt fälschlich ebenfalls `True`.
+    """
     normalisiert = zwei_faktor_krypto.backup_code_normalisieren(code)
 
     if not normalisiert:
@@ -2246,7 +2544,13 @@ def zwei_faktor_backup_code_pruefen_und_verbrauchen(benutzer_id, code):
         if treffer_id is None:
             return False
 
-        conn.execute("UPDATE backup_codes SET verwendet_am = ? WHERE id = ?", (_jetzt(), treffer_id))
+        cursor = conn.execute(
+            "UPDATE backup_codes SET verwendet_am = ? WHERE id = ? AND verwendet_am IS NULL",
+            (_jetzt(), treffer_id),
+        )
+
+        if cursor.rowcount == 0:
+            return False
 
     return True
 
@@ -2282,14 +2586,31 @@ def zwei_faktor_totp_pruefen(benutzer_id, code):
         secret, code, letzter_zeitschritt=zeile["letzter_zeitschritt"]
     )
 
-    if gueltig:
-        with _verbindung() as conn:
-            conn.execute(
-                "UPDATE zwei_faktor SET letzter_zeitschritt = ? WHERE user_id = ?",
-                (zeitschritt, benutzer_id),
-            )
+    if not gueltig:
+        return False, None
 
-    return gueltig, None
+    # Race-sicherer, atomarer Replay-Schutz (siehe CLAUDE.md
+    # "Concurrency"): die UPDATE-Bedingung prüft `letzter_zeitschritt`
+    # ERNEUT, direkt beim Schreiben - nicht nur (wie oben) einmalig beim
+    # Lesen. Haben zwei zeitgleiche Anfragen mit demselben gültigen Code
+    # denselben `letzter_zeitschritt` gelesen, kann nur die ZUERST
+    # committende diese Bedingung noch erfüllt vorfinden; die zweite
+    # findet `letzter_zeitschritt` bereits auf `zeitschritt` (oder höher)
+    # vorgerückt und aktualisiert 0 Zeilen - wird dann als Replay
+    # behandelt, obwohl ihre eigene TOTP-Prüfung isoliert betrachtet
+    # `gueltig=True` ergab.
+    with _verbindung() as conn:
+        cursor = conn.execute(
+            "UPDATE zwei_faktor SET letzter_zeitschritt = ? "
+            "WHERE user_id = ? AND aktiv = 1 "
+            "AND (letzter_zeitschritt IS NULL OR letzter_zeitschritt < ?)",
+            (zeitschritt, benutzer_id, zeitschritt),
+        )
+
+        if cursor.rowcount == 0:
+            return False, None
+
+    return True, None
 
 
 def zwei_faktor_code_pruefen(benutzer_id, code, ist_backup_code):
@@ -2363,6 +2684,18 @@ def zwei_faktor_challenge_pruefen_und_verbrauchen(roher_token, code, ist_backup_
     einem normalen Login zurückkehren, ein erneuter Versuch mit
     demselben Token liefert danach immer `erfolg=False` (Challenge nicht
     gefunden), egal wie korrekt der Code ist.
+
+    Race-sicher (siehe CLAUDE.md "Concurrency"): das "als verwendet
+    markieren" bei Erfolg ist eine atomare, bedingte `UPDATE ...
+    RETURNING`-Anweisung - gewinnt bei zwei zeitgleichen Versuchen mit
+    demselben (korrekten) Code nur EINER das Rennen, der andere erkennt
+    das über eine leere `RETURNING`-Zeile und wird als "nicht mehr
+    gültig" behandelt statt fälschlich ebenfalls eine zweite Sitzung zu
+    erzeugen. Der Fehlversuchszähler wird SQL-seitig atomar erhöht
+    (`fehlversuche = fehlversuche + 1 ... RETURNING fehlversuche`) statt
+    mit einem in Python zwischengespeicherten (potenziell veralteten)
+    Wert - zwei zeitgleiche Fehlversuche verlieren sich dadurch nicht
+    gegenseitig (kein "lost update").
     """
     token_hash = _token_hash(roher_token) if roher_token else None
 
@@ -2394,25 +2727,45 @@ def zwei_faktor_challenge_pruefen_und_verbrauchen(roher_token, code, ist_backup_
 
     if gueltig:
         with _verbindung() as conn:
-            conn.execute(
-                "UPDATE zwei_faktor_challenges SET verwendet_am = ? WHERE id = ?",
+            beansprucht = conn.execute(
+                "UPDATE zwei_faktor_challenges SET verwendet_am = ? "
+                "WHERE id = ? AND verwendet_am IS NULL AND abgebrochen_am IS NULL "
+                "RETURNING id",
                 (_jetzt(), zeile["id"]),
+            ).fetchone()
+
+        if not beansprucht:
+            return (
+                False,
+                "Diese Anmeldung ist nicht mehr gültig. Bitte melde dich erneut an.",
+                benutzer_id,
+                True,
             )
+
         return True, None, benutzer_id, True
 
-    neue_fehlversuche = zeile["fehlversuche"] + 1
-    challenge_beendet = neue_fehlversuche >= ZWEI_FAKTOR_CHALLENGE_MAX_FEHLVERSUCHE
-
     with _verbindung() as conn:
+        aktualisiert = conn.execute(
+            "UPDATE zwei_faktor_challenges SET fehlversuche = fehlversuche + 1 "
+            "WHERE id = ? AND verwendet_am IS NULL AND abgebrochen_am IS NULL "
+            "RETURNING fehlversuche",
+            (zeile["id"],),
+        ).fetchone()
+
+        if not aktualisiert:
+            # Zwischen dem Lesen oben und hier wurde die Challenge
+            # bereits (durch einen zeitgleichen Versuch) verbraucht oder
+            # abgebrochen - dieselbe Behandlung wie ein direkt nicht
+            # gefundener Token.
+            return False, "Diese Anmeldung ist nicht mehr gültig. Bitte melde dich erneut an.", benutzer_id, True
+
+        neue_fehlversuche = aktualisiert["fehlversuche"]
+        challenge_beendet = neue_fehlversuche >= ZWEI_FAKTOR_CHALLENGE_MAX_FEHLVERSUCHE
+
         if challenge_beendet:
             conn.execute(
-                "UPDATE zwei_faktor_challenges SET fehlversuche = ?, abgebrochen_am = ? WHERE id = ?",
-                (neue_fehlversuche, _jetzt(), zeile["id"]),
-            )
-        else:
-            conn.execute(
-                "UPDATE zwei_faktor_challenges SET fehlversuche = ? WHERE id = ?",
-                (neue_fehlversuche, zeile["id"]),
+                "UPDATE zwei_faktor_challenges SET abgebrochen_am = ? WHERE id = ?",
+                (_jetzt(), zeile["id"]),
             )
 
     if challenge_beendet:

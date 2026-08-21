@@ -346,7 +346,7 @@ class _FakePsycopg2Modul:
         RealDictCursor = object()
 
     @staticmethod
-    def connect(dsn, cursor_factory=None):
+    def connect(dsn, cursor_factory=None, sslmode=None):
         if "fehlschlagen" in dsn:
             raise RuntimeError("connection refused")
         return _FakePsycopg2Connection(dsn)
@@ -385,12 +385,17 @@ class DbBackendTests(unittest.TestCase):
             shutil.rmtree(tmp.parent, ignore_errors=True)
 
     def test_postgresql_verbindung_ueber_fake_modul(self):
+        """`postgresql_verbindung` liefert die portable Hülle
+        (`db_backend._PortableConnection`), nicht die rohe `psycopg2`-
+        Verbindung direkt - siehe Moduldocstring "Row-Verhalten
+        normalisieren". Die zugrundeliegende Fake-Verbindung ist über
+        `conn._conn` erreichbar, rein zu Testzwecken (White-Box)."""
         with mock.patch.object(db_backend, "_lade_psycopg2", return_value=_FakePsycopg2Modul):
             with db_backend.postgresql_verbindung("postgresql://fake/db") as conn:
-                self.assertIsInstance(conn, _FakePsycopg2Connection)
-                conn.cursor().execute("SELECT 1")
+                self.assertIsInstance(conn._conn, _FakePsycopg2Connection)
+                conn.execute("SELECT 1")
 
-            self.assertTrue(conn.committed)
+            self.assertTrue(conn._conn.committed)
 
     def test_s_postgresql_verbindungsfehler_nennt_nie_die_dsn(self):
         with mock.patch.object(db_backend, "_lade_psycopg2", return_value=_FakePsycopg2Modul):
@@ -413,7 +418,7 @@ class DbBackendTests(unittest.TestCase):
 
         with mock.patch.object(db_backend, "_lade_psycopg2", return_value=_FakePsycopg2Modul):
             with db_backend.verbindung("/irrelevant.db") as conn:
-                self.assertIsInstance(conn, _FakePsycopg2Connection)
+                self.assertIsInstance(conn._conn, _FakePsycopg2Connection)
 
     def test_unbekanntes_backend_wird_klar_abgelehnt(self):
         os.environ["CLEVORIQ_DATABASE_BACKEND"] = "oracle"
@@ -422,12 +427,11 @@ class DbBackendTests(unittest.TestCase):
             with db_backend.verbindung("/irrelevant.db"):
                 pass
 
-    def test_datenbank_initialisieren_scheitert_klar_bei_postgresql(self):
-        os.environ["CLEVORIQ_DATABASE_BACKEND"] = "postgresql"
-        os.environ["CLEVORIQ_DATABASE_URL"] = "postgresql://fake/db"
-
-        with self.assertRaises(NotImplementedError):
-            speicher.datenbank_initialisieren()
+    # `datenbank_initialisieren()` lehnte PostgreSQL in Block 4 noch mit
+    # einem klaren `NotImplementedError` ab (SQL/Schema waren noch
+    # SQLite-spezifisch) - Block 5 portiert genau das, siehe
+    # `test_dialekt_konsistenz.py`s `PostgresqlSchemaTests` für die neue
+    # Abdeckung (Schema-Erstellung/Migration gegen ein Fake-`psycopg2`).
 
 
 # --------------------------------------------------------------------------
