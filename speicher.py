@@ -26,6 +26,7 @@ import json
 import secrets
 import shutil
 import sqlite3
+import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -33,6 +34,7 @@ from pathlib import Path
 import numpy as np
 
 import auth
+import produkte
 import zwei_faktor_krypto
 
 
@@ -65,6 +67,16 @@ PENDING_2FA_GUELTIGKEIT_MINUTEN = 15
 ZWEI_FAKTOR_CHALLENGE_GUELTIGKEIT_MINUTEN = 10
 ZWEI_FAKTOR_CHALLENGE_MAX_FEHLVERSUCHE = 5
 BACKUP_CODES_ANZAHL = 10
+
+# Produktzugriffs-Status (siehe `produkt_zugriffe`-Tabelle/Abschnitt
+# "Produktzugriffe" unten). Nur "aktiv" gewährt tatsächlichen Zugriff
+# (siehe `produkt_zugriff_aktiv`) - die anderen beiden existieren bereits
+# jetzt im Schema, damit ein künftiges Sperren/Deaktivieren (z. B. bei
+# einer ausbleibenden Zahlung) ohne weitere Schemaänderung möglich ist,
+# auch wenn in diesem Architekturblock noch nichts diese Status setzt.
+PRODUKT_STATUS_AKTIV = "aktiv"
+PRODUKT_STATUS_GESPERRT = "gesperrt"
+PRODUKT_STATUS_DEAKTIVIERT = "deaktiviert"
 
 
 APP_DATEN_ORDNER = Path(__file__).resolve().parent / "app_daten"
@@ -192,6 +204,7 @@ def _dokumente_tabelle_neu_aufbauen():
                 dateityp TEXT NOT NULL DEFAULT 'pdf',
                 einheit_typ TEXT NOT NULL DEFAULT 'seite',
                 groesse_bytes INTEGER,
+                public_id TEXT,
                 UNIQUE(hash, user_id)
             )
             """
@@ -200,9 +213,9 @@ def _dokumente_tabelle_neu_aufbauen():
             """
             INSERT INTO dokumente
                 (id, user_id, dateiname, hash, seitenzahl, hochgeladen_am,
-                 dateityp, einheit_typ, groesse_bytes)
+                 dateityp, einheit_typ, groesse_bytes, public_id)
             SELECT id, user_id, dateiname, hash, seitenzahl, hochgeladen_am,
-                   dateityp, einheit_typ, groesse_bytes
+                   dateityp, einheit_typ, groesse_bytes, public_id
             FROM dokumente_migration_alt
             """
         )
@@ -422,6 +435,65 @@ def _migration_bestandsdaten_zuweisen(conn):
     conn.execute("UPDATE chats SET user_id = ? WHERE user_id IS NULL", (migrations_id,))
 
 
+def _dokumente_public_ids_ergaenzen(conn):
+    """Stattet jedes bestehende Dokument OHNE `public_id` idempotent mit
+    einer stabilen, nicht erratbaren UUID aus (siehe CLAUDE.md "Zentrale
+    Dokument-ID").
+
+    Läuft bei jedem Start; sobald jedes Dokument eine `public_id` hat,
+    findet die SELECT-Abfrage nichts mehr und die Funktion ist ein No-Op.
+    Neue Dokumente erhalten ihre `public_id` bereits direkt bei der
+    Erstellung (siehe `dokument_speichern`) - dieser Pfad betrifft nur
+    Alt-Datenbanken von vor Einführung dieser Spalte. Die `public_id`
+    ist NIE eine eigenständige Zugriffsgrundlage: jede Funktion, die sie
+    entgegennimmt (siehe `dokument_nach_public_id`), prüft weiterhin
+    zwingend die Eigentümerschaft (`user_id`) - die UUID macht ein
+    Dokument nur produktübergreifend identifizierbar, nicht zugreifbar.
+    """
+    zeilen = conn.execute("SELECT id FROM dokumente WHERE public_id IS NULL").fetchall()
+
+    for zeile in zeilen:
+        conn.execute(
+            "UPDATE dokumente SET public_id = ? WHERE id = ?",
+            (str(uuid.uuid4()), zeile["id"]),
+        )
+
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_dokumente_public_id "
+        "ON dokumente(public_id) WHERE public_id IS NOT NULL"
+    )
+
+
+def _produktzugriffe_migrieren(conn):
+    """Gewährt jedem bestehenden Benutzer OHNE Zugriffszeile automatisch
+    aktiven Zugriff auf Clevoriq Documents (siehe CLAUDE.md "Produktsystem").
+
+    Idempotent: ein Benutzer, der bereits (aus welchem Grund auch immer,
+    z. B. eine künftige manuelle Sperre) eine Zeile für `documents` hat,
+    wird hier NICHT angefasst - nur wer noch GAR KEINE Zeile für dieses
+    Produkt hat, bekommt eine neue mit Status "aktiv". Neue Benutzer
+    bekommen ihren Zugriff bereits direkt bei der Registrierung (siehe
+    `benutzer_erstellen`) - dieser Pfad deckt ausschließlich Alt-Konten ab,
+    die vor Einführung des Produktzugriffsmodells angelegt wurden.
+    """
+    jetzt = _jetzt()
+
+    fehlende_benutzer = conn.execute(
+        "SELECT b.id FROM benutzer b "
+        "LEFT JOIN produkt_zugriffe p ON p.user_id = b.id AND p.product_key = ? "
+        "WHERE p.id IS NULL",
+        (produkte.PRODUKT_DOCUMENTS,),
+    ).fetchall()
+
+    for zeile in fehlende_benutzer:
+        conn.execute(
+            "INSERT INTO produkt_zugriffe "
+            "(user_id, product_key, status, plan, aktiviert_am) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (zeile["id"], produkte.PRODUKT_DOCUMENTS, PRODUKT_STATUS_AKTIV, produkte.STANDARD_PLAN, jetzt),
+        )
+
+
 def _dateien_migrieren():
     """Verschiebt Originaldateien aus dem alten, gemeinsamen `pdfs/`-Ordner
     in die neue Pro-Benutzer-Struktur (`users/<id>/documents/`).
@@ -618,6 +690,19 @@ def datenbank_initialisieren():
             CREATE INDEX IF NOT EXISTS idx_2fa_challenges_token
                 ON zwei_faktor_challenges(challenge_token_hash);
             CREATE INDEX IF NOT EXISTS idx_2fa_challenges_user ON zwei_faktor_challenges(user_id);
+
+            CREATE TABLE IF NOT EXISTS produkt_zugriffe (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL REFERENCES benutzer(id) ON DELETE CASCADE,
+                product_key TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'aktiv',
+                plan TEXT NOT NULL DEFAULT 'standard',
+                aktiviert_am TEXT NOT NULL,
+                laeuft_ab_am TEXT,
+                UNIQUE(user_id, product_key)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_produkt_zugriffe_user ON produkt_zugriffe(user_id);
             """
         )
 
@@ -648,6 +733,7 @@ def datenbank_initialisieren():
                 ("einheit_typ", "TEXT NOT NULL DEFAULT 'seite'"),
                 ("groesse_bytes", "INTEGER"),
                 ("user_id", "INTEGER REFERENCES benutzer(id)"),
+                ("public_id", "TEXT"),
             ],
         )
         _spalten_ergaenzen(
@@ -667,6 +753,8 @@ def datenbank_initialisieren():
         )
 
         _migration_bestandsdaten_zuweisen(conn)
+        _dokumente_public_ids_ergaenzen(conn)
+        _produktzugriffe_migrieren(conn)
         muss_dokumente_neu_aufbauen = not _dokumente_tabelle_pro_benutzer_eindeutig(conn)
 
     if muss_dokumente_neu_aufbauen:
@@ -728,7 +816,21 @@ def benutzer_erstellen(benutzername, email, passwort):
             "VALUES (?, ?, ?, ?, ?, 1, 0)",
             (benutzername.strip(), email.strip().lower(), auth.passwort_hash(passwort), jetzt, jetzt),
         )
-        return cursor.lastrowid
+        neue_id = cursor.lastrowid
+
+        # Jeder neue Benutzer bekommt in dieser Entwicklungsphase
+        # automatisch Zugriff auf Clevoriq Documents (siehe CLAUDE.md
+        # "Produktsystem") - noch keine Kaufabwicklung, aber bereits über
+        # dasselbe datengetriebene Zugriffsmodell wie jedes künftige
+        # Produkt, nicht über eine Sonderbehandlung im Code.
+        conn.execute(
+            "INSERT INTO produkt_zugriffe "
+            "(user_id, product_key, status, plan, aktiviert_am) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (neue_id, produkte.PRODUKT_DOCUMENTS, PRODUKT_STATUS_AKTIV, produkte.STANDARD_PLAN, jetzt),
+        )
+
+        return neue_id
 
 
 def benutzername_frei(benutzername, ausser_benutzer_id=None):
@@ -1393,8 +1495,9 @@ def dokument_speichern(dateiname, hash_wert, datei_bytes, einheiten_anzahl, date
     with _verbindung() as conn:
         cursor = conn.execute(
             "INSERT INTO dokumente "
-            "(user_id, dateiname, hash, seitenzahl, hochgeladen_am, dateityp, einheit_typ, groesse_bytes) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "(user_id, dateiname, hash, seitenzahl, hochgeladen_am, dateityp, einheit_typ, "
+            "groesse_bytes, public_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 benutzer_id,
                 dateiname,
@@ -1404,6 +1507,7 @@ def dokument_speichern(dateiname, hash_wert, datei_bytes, einheiten_anzahl, date
                 dateityp,
                 einheit_typ,
                 len(datei_bytes),
+                str(uuid.uuid4()),
             ),
         )
         dokument_id = cursor.lastrowid
@@ -1489,6 +1593,49 @@ def dokument_loeschen(dokument_id, benutzer_id):
     (_benutzer_dokumente_ordner(benutzer_id) / f"{zeile['hash']}.{dateityp}").unlink(missing_ok=True)
 
 
+def dokument_nach_public_id(public_id, benutzer_id):
+    """Lädt ein Dokument über seine stabile, produktübergreifende
+    `public_id` (siehe CLAUDE.md "Zentrale Dokument-ID") - NUR wenn es
+    tatsächlich diesem Benutzer gehört, sonst `None`.
+
+    Wie jede andere Dokument-Zugriffsfunktion dieser Datei ist die
+    Eigentümerschaftsprüfung (`user_id = ?`) hier zwingend Teil der
+    Abfrage selbst: die Kenntnis einer gültigen `public_id` (z. B. eines
+    ANDEREN Benutzers) gewährt für sich genommen NIEMALS Zugriff - genau
+    wie die interne, numerische `id` ist auch die `public_id` kein
+    Zugriffs-Geheimnis, nur ein Bezeichner.
+    """
+    with _verbindung() as conn:
+        zeile = conn.execute(
+            "SELECT * FROM dokumente WHERE public_id = ? AND user_id = ?",
+            (public_id, benutzer_id),
+        ).fetchone()
+        return dict(zeile) if zeile else None
+
+
+def dokument_umbenennen(dokument_id, benutzer_id, neuer_dateiname):
+    """Benennt ein Dokument DIESES Benutzers um (Anzeigename, nicht die
+    Datei auf der Festplatte - die bleibt unter ihrem Hash-Namen
+    unverändert, siehe `_benutzer_dokumente_ordner`).
+
+    Wie `dokument_loeschen`: gehört die ID keinem Dokument dieses
+    Benutzers, passiert schlicht nichts (kein Fehler, keine Änderung).
+    Gibt `True` bei tatsächlicher Umbenennung zurück, sonst `False`
+    (leerer Name oder kein passendes/eigenes Dokument).
+    """
+    neuer_dateiname = (neuer_dateiname or "").strip()
+
+    if not neuer_dateiname:
+        return False
+
+    with _verbindung() as conn:
+        cursor = conn.execute(
+            "UPDATE dokumente SET dateiname = ? WHERE id = ? AND user_id = ?",
+            (neuer_dateiname, dokument_id, benutzer_id),
+        )
+        return cursor.rowcount > 0
+
+
 def chunks_laden(dokument_ids, benutzer_id):
     """Lädt Chunks (inkl. Embedding als numpy-Array) der übergebenen Dokumente.
 
@@ -1524,6 +1671,77 @@ def chunks_laden(dokument_ids, benutzer_id):
         }
         for zeile in zeilen
     ]
+
+
+# --- Produktzugriffe ---
+#
+# Datengetriebenes Zugriffsmodell für die Clevoriq-Plattform (siehe
+# CLAUDE.md "Produktsystem"/"Clevoriq Hub"): welche Produkte ein
+# Benutzer nutzen darf, steht ausschließlich in `produkt_zugriffe`, nie
+# in einer Code-Sonderbehandlung für ein bestimmtes Produkt. Aktuell
+# gibt es real nur `produkte.PRODUKT_DOCUMENTS`; ein künftiges zweites
+# Produkt braucht hier keine neue Funktion, nur weitere Zeilen mit einem
+# neuen `product_key`.
+
+
+def produkt_zugriff_gewaehren(benutzer_id, product_key, plan=None):
+    """Gewährt (idempotent) aktiven Zugriff auf ein Produkt.
+
+    Legt NUR an, wenn noch KEINE Zeile für dieses (Benutzer, Produkt)-Paar
+    existiert (`UNIQUE(user_id, product_key)`) - ein bereits bestehender
+    Eintrag (egal welchen Status er trägt, z. B. eine künftige manuelle
+    Sperre) wird NIE stillschweigend überschrieben. Wird sowohl von
+    `benutzer_erstellen` (neue Konten) als auch von der additiven
+    Migration `_produktzugriffe_migrieren` (Alt-Konten) genutzt.
+    """
+    with _verbindung() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO produkt_zugriffe "
+            "(user_id, product_key, status, plan, aktiviert_am) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (benutzer_id, product_key, PRODUKT_STATUS_AKTIV, plan or produkte.STANDARD_PLAN, _jetzt()),
+        )
+
+
+def produkt_zugriff_aktiv(benutzer_id, product_key):
+    """Zentrale, serverseitige Berechtigungsprüfung: darf dieser Benutzer
+    dieses Produkt gerade nutzen?
+
+    MUSS bei jedem Zugriff auf ein Produkt geprüft werden (siehe
+    CLAUDE.md "deny by default") - nicht nur, um einen Button im Hub
+    ein-/auszublenden, sondern auch bei jedem direkten Aufruf eines
+    Produktbereichs (`web_app.py`), damit ein manipulierter/direkt
+    gesetzter Bereichs-Zustand ohne gültige Berechtigung keinen Zugriff
+    gewährt. Prüft sowohl `status = 'aktiv'` als auch ein optionales
+    Ablaufdatum (`laeuft_ab_am`) - ein abgelaufener Zugriff zählt NICHT
+    mehr als aktiv, selbst wenn die Zeile noch als "aktiv" markiert ist.
+    """
+    with _verbindung() as conn:
+        zeile = conn.execute(
+            "SELECT status, laeuft_ab_am FROM produkt_zugriffe "
+            "WHERE user_id = ? AND product_key = ?",
+            (benutzer_id, product_key),
+        ).fetchone()
+
+    if not zeile or zeile["status"] != PRODUKT_STATUS_AKTIV:
+        return False
+
+    if zeile["laeuft_ab_am"] and datetime.fromisoformat(zeile["laeuft_ab_am"]) < datetime.now():
+        return False
+
+    return True
+
+
+def produkte_des_benutzers(benutzer_id):
+    """Alle Produktzugriffszeilen DIESES Benutzers - Grundlage für die
+    „Meine Produkte“-Ansicht im Clevoriq Hub (siehe `hub.py`)."""
+    with _verbindung() as conn:
+        zeilen = conn.execute(
+            "SELECT product_key, status, plan, aktiviert_am, laeuft_ab_am "
+            "FROM produkt_zugriffe WHERE user_id = ?",
+            (benutzer_id,),
+        ).fetchall()
+        return [dict(zeile) for zeile in zeilen]
 
 
 # --- Chats ---

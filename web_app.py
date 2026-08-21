@@ -1,13 +1,14 @@
-from datetime import datetime, timedelta
-
 import streamlit as st
 
 import analyse
 import benutzer
+import bibliothek_ansicht
 import dokument_verarbeitung
 import dokumentbibliothek
+import hub
 import komponenten
 import konto
+import produkte
 import pruefung
 import retrieval
 import sicherheitslog
@@ -19,6 +20,12 @@ from quellen import (
     verwendete_quellen,
 )
 
+
+# Clevoriq Hub: die neue Landing-Page nach dem Login (siehe CLAUDE.md
+# "Clevoriq Account & Hub") - Startpunkt für "Meine Produkte", die
+# zentrale Bibliothek und Konto & Sicherheit, BEVOR ein Produkt (aktuell
+# nur Clevoriq Documents) geöffnet wird.
+BEREICH_HUB = "🏠 Clevoriq Hub"
 
 BEREICH_START = "🏠 Startseite"
 BEREICH_CHAT = "💬 Chat"
@@ -32,6 +39,16 @@ BEREICH_KONTO = benutzer.BEREICH_KONTO
 # Einziger Bereich, den ein noch nicht e-mail-verifiziertes Konto neben
 # BEREICH_KONTO erreichen kann (siehe Zugriffsbeschränkung weiter unten).
 BEREICH_VERIFIZIERUNG = benutzer.BEREICH_VERIFIZIERUNG
+
+# Bereiche des Produkts "Clevoriq Documents" - nur erreichbar, solange
+# `speicher.produkt_zugriff_aktiv(benutzer_id, produkte.PRODUKT_DOCUMENTS)`
+# True liefert (siehe Zugriffsschranke weiter unten). NICHT
+# hartverdrahtet an eine bestimmte Benutzer-/Kontoprüfung, sondern rein
+# über das datengetriebene Produktzugriffsmodell (siehe CLAUDE.md
+# "Produktsystem") - ein künftiges zweites Produkt bekäme eine eigene,
+# analoge Menge von Bereichen plus einen eigenen `product_key`, keine
+# neue Sonderfall-Prüfung.
+DOCUMENTS_BEREICHE = {BEREICH_START, BEREICH_CHAT, BEREICH_ANALYSE, BEREICH_PRUEFUNG}
 
 
 st.set_page_config(
@@ -124,9 +141,34 @@ if "aktueller_chat_id" not in st.session_state:
 # denselben Zustand setzen können sollen. Ein Widget-gebundener Key
 # (z. B. bei st.radio) ließe sich nach dessen Instanziierung im selben
 # Lauf nicht mehr direkt setzen - als reine Variable ist das problemlos
-# möglich, gefolgt von st.rerun().
+# möglich, gefolgt von st.rerun(). Standard-Landing nach dem Login ist
+# NEU der Clevoriq Hub, nicht mehr direkt Clevoriq Documents (siehe
+# CLAUDE.md "Clevoriq Account & Hub").
 if "aktiver_bereich" not in st.session_state:
-    st.session_state.aktiver_bereich = BEREICH_START
+    st.session_state.aktiver_bereich = BEREICH_HUB
+
+# "hub" oder "documents" - steuert, welche Navigationsgruppe die Sidebar
+# zeigt (siehe weiter unten). Bewusst getrennt von `aktiver_bereich`:
+# ein gemeinsam genutzter Bereich wie die Bibliothek oder Konto &
+# Sicherheit ändert den Kontext NICHT, damit "Zurück"-Navigation
+# innerhalb desselben Kontexts sinnvoll bleibt.
+if "aktiver_kontext" not in st.session_state:
+    st.session_state.aktiver_kontext = "hub"
+
+# Zentrale, serverseitige Produktzugriffsschranke (siehe CLAUDE.md
+# "Produktzugriff"/"deny by default"): läuft bei JEDEM Skriptlauf, egal
+# wie `aktiver_bereich` zustande kam (Sidebar-Klick, Hub-Button oder ein
+# - in dieser reinen `st.session_state`-Architektur zwar nicht von
+# außen, aber potenziell durch einen künftigen Programmfehler -
+# anderweitig gesetzter Zustand). Ein Verstecken des "Öffnen"-Buttons im
+# Hub allein wäre KEINE echte Zugriffskontrolle.
+if (
+    st.session_state.aktiver_bereich in DOCUMENTS_BEREICHE
+    and not speicher.produkt_zugriff_aktiv(benutzer_id, produkte.PRODUKT_DOCUMENTS)
+):
+    st.session_state.aktiver_bereich = BEREICH_HUB
+    st.session_state.aktiver_kontext = "hub"
+    st.toast("Kein Zugriff auf Clevoriq Documents.", icon="⚠️")
 
 
 def dateien_verarbeiten(dateien, benutzer_id):
@@ -235,21 +277,51 @@ with st.sidebar:
             st.session_state.aktiver_bereich = BEREICH_VERIFIZIERUNG
             st.rerun()
     else:
-        # Startseite bewusst größer/prominenter als die übrigen Bereiche
-        # (gleicher Button-Typ, nur über `gross=True` optisch hervorgehoben)
-        # - sie ist der primäre Einstiegspunkt der App.
-        if komponenten.nav_eintrag(BEREICH_START, aktiv=bereich == BEREICH_START, key="start", gross=True):
-            st.session_state.aktiver_bereich = BEREICH_START
-            st.rerun()
+        kontext = st.session_state.aktiver_kontext
 
-        for ziel, key_suffix in (
-            (BEREICH_CHAT, "chat"),
-            (BEREICH_ANALYSE, "analyse"),
-            (BEREICH_PRUEFUNG, "pruefung"),
-            (BEREICH_BIBLIOTHEK, "bibliothek"),
-        ):
-            if komponenten.nav_eintrag(ziel, aktiv=bereich == ziel, key=key_suffix):
-                st.session_state.aktiver_bereich = ziel
+        if kontext == "documents":
+            # Innerhalb von Clevoriq Documents: Startseite bewusst
+            # größer/prominenter (gleicher Button-Typ, nur über
+            # `gross=True` optisch hervorgehoben) - sie ist der primäre
+            # Einstiegspunkt DES PRODUKTS, nicht mehr der ganzen App.
+            st.caption("PRODUKT")
+
+            if komponenten.nav_eintrag(BEREICH_START, aktiv=bereich == BEREICH_START, key="start", gross=True):
+                st.session_state.aktiver_bereich = BEREICH_START
+                st.rerun()
+
+            for ziel, key_suffix in (
+                (BEREICH_CHAT, "chat"),
+                (BEREICH_ANALYSE, "analyse"),
+                (BEREICH_PRUEFUNG, "pruefung"),
+                (BEREICH_BIBLIOTHEK, "bibliothek"),
+            ):
+                if komponenten.nav_eintrag(ziel, aktiv=bereich == ziel, key=key_suffix):
+                    st.session_state.aktiver_bereich = ziel
+                    st.rerun()
+
+            st.divider()
+
+            if st.button("← Zurück zum Clevoriq Hub", key="zurueck_zum_hub", use_container_width=True):
+                st.session_state.aktiver_kontext = "hub"
+                st.session_state.aktiver_bereich = BEREICH_HUB
+                st.rerun()
+        else:
+            # Clevoriq Hub: Meine Produkte (= der Hub selbst) + die
+            # zentrale Bibliothek - dieselbe Bibliothek, die auch
+            # innerhalb von Clevoriq Documents erreichbar ist (siehe
+            # `bibliothek_ansicht.rendern`, EINE Implementierung für
+            # beide Einstiegspunkte).
+            st.caption("CLEVORIQ")
+
+            if komponenten.nav_eintrag(BEREICH_HUB, aktiv=bereich == BEREICH_HUB, key="hub", gross=True):
+                st.session_state.aktiver_bereich = BEREICH_HUB
+                st.rerun()
+
+            if komponenten.nav_eintrag(
+                BEREICH_BIBLIOTHEK, aktiv=bereich == BEREICH_BIBLIOTHEK, key="hub_bibliothek"
+            ):
+                st.session_state.aktiver_bereich = BEREICH_BIBLIOTHEK
                 st.rerun()
 
     st.divider()
@@ -328,7 +400,35 @@ with st.sidebar:
     benutzer.konto_bereich()
 
 
-if bereich == BEREICH_START:
+if bereich == BEREICH_HUB:
+    aktion = hub.seite(benutzer_id)
+
+    if aktion == hub.AKTION_DOKUMENTE_OEFFNEN:
+        # Serverseitige Zugriffsprüfung ERNEUT hier (nicht nur die im
+        # Hub bereits deaktivierte Schaltfläche, siehe CLAUDE.md "deny by
+        # default") - Öffnen wechselt NUR den Kontext dieser bestehenden,
+        # bereits angemeldeten Clevoriq-Sitzung; es entsteht weder ein
+        # erneuter Login noch eine zweite Sitzung.
+        if speicher.produkt_zugriff_aktiv(benutzer_id, produkte.PRODUKT_DOCUMENTS):
+            st.session_state.aktiver_kontext = "documents"
+            st.session_state.aktiver_bereich = BEREICH_START
+            st.rerun()
+        else:
+            st.toast("Kein Zugriff auf Clevoriq Documents.", icon="⚠️")
+    elif aktion == hub.AKTION_BIBLIOTHEK:
+        st.session_state.aktiver_bereich = BEREICH_BIBLIOTHEK
+        st.rerun()
+    elif aktion == hub.AKTION_KONTO:
+        st.session_state.aktiver_bereich = BEREICH_KONTO
+        st.rerun()
+
+
+elif bereich == BEREICH_START:
+    if st.button("← Zurück zum Clevoriq Hub", key="doc_start_zurueck_zum_hub"):
+        st.session_state.aktiver_kontext = "hub"
+        st.session_state.aktiver_bereich = BEREICH_HUB
+        st.rerun()
+
     komponenten.hero_glow()
     komponenten.marke_kopf(gross=True)
     komponenten.marke_tagline()
@@ -798,142 +898,8 @@ elif bereich == BEREICH_KONTO:
 
 
 else:  # BEREICH_BIBLIOTHEK
-    komponenten.seiten_hero(
-        "📚",
-        "Dokumentenbibliothek",
-        "Alle deine Dokumente an einem Ort.",
-    )
-
-    st.markdown("## 📤 Dokumente hinzufügen")
-
-    bibliothek_dateien = st.file_uploader(
-        "Dateien auswählen",
-        type=dokument_verarbeitung.SUPPORTED_EXTENSIONS,
-        accept_multiple_files=True,
-        key="bibliothek_uploader",
-        label_visibility="collapsed",
-    )
-    dateien_verarbeiten(bibliothek_dateien, benutzer_id)
-
-    st.divider()
-
-    alle_dokumente_bibliothek = speicher.dokumente_laden(benutzer_id)
-    wort = "Dokument" if len(alle_dokumente_bibliothek) == 1 else "Dokumente"
-    st.markdown(f"## 📚 {len(alle_dokumente_bibliothek)} {wort} in deiner Bibliothek")
-
-    if not alle_dokumente_bibliothek:
-        komponenten.leerer_zustand("Noch keine Dokumente in der Bibliothek. Lade oben deine erste Datei hoch.")
-    else:
-        spalte_suche, spalte_sortierung, spalte_typ = st.columns([3, 2, 2])
-
-        suchbegriff = spalte_suche.text_input(
-            "Dokumente durchsuchen",
-            placeholder="🔍 Dokumente durchsuchen",
-            label_visibility="collapsed",
-            key="bibliothek_seite_suchbegriff",
-        ).strip()
-
-        sortierung = spalte_sortierung.selectbox(
-            "Sortierung",
-            options=dokumentbibliothek.SORTIERUNGEN,
-            label_visibility="collapsed",
-            key="bibliothek_seite_sortierung",
-        )
-
-        dateityp_filter = spalte_typ.selectbox(
-            "Dateityp",
-            options=dokumentbibliothek.dateitypen_optionen(alle_dokumente_bibliothek),
-            format_func=lambda t: (
-                t if t == dokumentbibliothek.DATEITYP_ALLE else dokumentbibliothek.dateityp_anzeige(t)
-            ),
-            label_visibility="collapsed",
-            key="bibliothek_seite_dateityp",
-        )
-
-        spalte_datum, spalte_datumsbereich = st.columns([2, 3])
-
-        datumsfilter = spalte_datum.selectbox(
-            "Zeitraum",
-            options=dokumentbibliothek.DATUMSFILTER,
-            label_visibility="collapsed",
-            key="bibliothek_seite_datumsfilter",
-        )
-
-        benutzerdefiniert_von = None
-        benutzerdefiniert_bis = None
-
-        if datumsfilter == dokumentbibliothek.DATUMSFILTER_BENUTZERDEFINIERT:
-            heute = datetime.now().date()
-            datumsbereich = spalte_datumsbereich.date_input(
-                "Zeitraum wählen",
-                value=(heute - timedelta(days=7), heute),
-                label_visibility="collapsed",
-                key="bibliothek_seite_datumsbereich",
-            )
-            if isinstance(datumsbereich, tuple) and len(datumsbereich) == 2:
-                benutzerdefiniert_von, benutzerdefiniert_bis = datumsbereich
-
-        gefilterte_dokumente = dokumentbibliothek.dokumente_filtern(
-            alle_dokumente_bibliothek,
-            suchbegriff=suchbegriff,
-            datumsfilter=datumsfilter,
-            benutzerdefiniert_von=benutzerdefiniert_von,
-            benutzerdefiniert_bis=benutzerdefiniert_bis,
-            dateityp_filter=dateityp_filter,
-        )
-        angezeigte_dokumente = dokumentbibliothek.dokumente_sortieren(
-            gefilterte_dokumente, sortierung
-        )
-
-        gefiltert_aktiv = (
-            suchbegriff
-            or datumsfilter != dokumentbibliothek.DATUMSFILTER_ALLE
-            or dateityp_filter != dokumentbibliothek.DATEITYP_ALLE
-        )
-
-        if gefiltert_aktiv:
-            st.caption(
-                f"{len(angezeigte_dokumente)} von {len(alle_dokumente_bibliothek)} "
-                "Dokumenten angezeigt"
-            )
-
-        if not angezeigte_dokumente:
-            komponenten.leerer_zustand("Keine Dokumente gefunden.")
-        else:
-            spalten = st.columns(2)
-
-            for index, dokument in enumerate(angezeigte_dokumente):
-                dokument_id = dokument["id"]
-                hochgeladen_am = datetime.fromisoformat(
-                    dokument["hochgeladen_am"]
-                ).strftime("%d.%m.%Y")
-                groesse = dokumentbibliothek.groesse_text(dokument)
-
-                with spalten[index % 2].container(border=True, key=f"bibliothek_karte_{dokument_id}"):
-                    st.markdown(f"**{dokument['dateiname']}**")
-                    st.caption(
-                        dokumentbibliothek.dateityp_anzeige(dokument.get("dateityp", "pdf"))
-                        + " · "
-                        + dokumentbibliothek.einheiten_text(dokument)
-                    )
-
-                    zusatz = f"Hochgeladen am {hochgeladen_am}"
-                    if groesse:
-                        zusatz += f" · {groesse}"
-                    st.caption(zusatz)
-                    st.caption("✅ Gespeichert")
-
-                    with st.popover("🗑 Löschen"):
-                        st.write(f"„{dokument['dateiname']}“ entfernen?")
-                        st.caption(
-                            "Löscht auch alle gespeicherten Textausschnitte und "
-                            "entfernt das Dokument aus allen Chats."
-                        )
-                        if st.button(
-                            "Endgültig löschen",
-                            key=f"bibliothek_confirm_del_{dokument_id}",
-                            type="secondary",
-                            use_container_width=True,
-                        ):
-                            speicher.dokument_loeschen(dokument_id, benutzer_id)
-                            st.rerun()
+    # Die EINE zentrale Bibliotheksoberfläche ("Clevoriq Library", siehe
+    # `bibliothek_ansicht.py`) - identisch aufgerufen, egal ob dieser
+    # Bereich vom Clevoriq Hub oder von innerhalb Clevoriq Documents aus
+    # erreicht wurde. Keine zweite Implementierung, keine Kopie.
+    bibliothek_ansicht.rendern(benutzer_id, dateien_verarbeiten)

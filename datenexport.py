@@ -64,6 +64,7 @@ def zip_erstellen(benutzer_id):
     dokumente_json = [
         {
             "id": d["id"],
+            "public_id": d.get("public_id"),
             "dateiname": d["dateiname"],
             "dateityp": d.get("dateityp"),
             "einheit_typ": d.get("einheit_typ"),
